@@ -1,0 +1,31 @@
+# Build directory
+build/
+build-dudect/
+
+# CMake generated files (if accidentally created in source dir)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Build artifacts
+*.a
+*.so
+*.dylib
+
+# Generated KEM KAT vectors (kem_kat_gen); the in-tree regression anchor is the
+# pinned digest in tests/kem_kat_common.h, not the bulky .req/.rsp files.
+*.req
+*.rsp
+
+# IDE files
+.vscode/
+.idea/
+.clang-format
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,3 @@
+[submodule "third_party/libtalos_ichor"]
+	path = third_party/libtalos_ichor
+	url = https://github.com/TalosLogic/libtalos_ichor.git

@@ -1,0 +1,104 @@
+================================================================
+libtalos_syndrome dudect timing-validation evidence trail
+Architecture: aarch64 (Apple M1, macOS)
+Host:         macOS / Apple clang 17
+Date:         2026-08-02 (v1.0.0 constant-time release gate;
+                          per-set binaries run 2026-07-30 .. 08-02)
+================================================================
+
+Scope
+-----
+  This trail covers libtalos_syndrome's OWN secret-input entrypoints
+  (tools/dudect/targets_syndrome.c): the masked fixed-weight sampler, the
+  rotated-syndrome bit-flip decoder, the KEM encap/decap glue, the Argus
+  opener tail, and the seed-API public-key recovery.  The gf2x circulant
+  ring, the fixed-weight sampler core, AES/SHAKE, and the carry-less
+  multiply underneath are libtalos_ichor's and are validated in ichor's
+  own trail (third_party/libtalos_ichor/docs/dudect-runs/).  The harness
+  pins ichor to its software fallback (dudect_main.c sets
+  ICHOR_FORCE_BACKEND) so the measured path is syndrome's hand-written
+  scalar code, not a constant-time-by-construction ISA instruction.
+
+Environment
+-----------
+  CPU:        Apple M1 (aarch64, Firestorm/Icestorm)
+  Compiler:   Apple clang 17
+  Timer:      CNTVCT_EL0 (24 MHz, ~41.7 ns/tick)
+  Affinity:   pinned to CPU 1
+  Governor:   none (macOS has no user-space frequency governor;
+              P/E-core migration adds noise, so runs were taken on an
+              otherwise-quiet host)
+  Crop:       [1.00%, 99.00%]
+  Samples:    100000 per class, reps_per_trial = 1
+  Threshold:  |t| > 4.5  ->  FAIL
+
+  Why this host: a non-x86 microarchitecture and the Apple clang
+  toolchain.  clang >= 17 is the toolchain that lowered the Argus
+  support-scatter masked select into a secret-dependent branch before the
+  A-M2 fix (SECURITY_REVIEW_1_0_0 section 12.6), so a clean argus_tail
+  here is direct post-fix confirmation on an affected compiler.
+
+Build
+-----
+  cmake -B build-dudect -DSYNDROME_BUILD_DUDECT=ON -DSYNDROME_MINIMAL_BUILD=<set>
+  cmake --build build-dudect --target syndrome_dudect_<set>
+  # one binary per parameter set (syndrome_dudect_128_2 / _256_2);
+  # each target measured with --target <name> --samples 100000.
+
+  Release gate: 128_2 + 256_2 (the two n0=2 sets).
+
+================================================================
+Results -- --samples 100000 (v1.0.0 gate)
+================================================================
+
+  set 128_2 (p=13613, t=130, AES-DM opener KDF)
+    sample_fixed_weight   |t| = 0.28   PASS
+    bitflip_decode        |t| = 0.12   PASS
+    kem_encap             |t| = 0.61   PASS
+    kem_decap             |t| = 0.24   PASS
+    argus_tail            |t| = 1.10   PASS
+    argus_tail_weight     |t| = 0.03   PASS
+    pubkey_from_sk        |t| = 0.36   PASS
+
+  set 256_2 (p=43451, t=261, Grostl-256 opener KDF)
+    sample_fixed_weight   |t| = 0.46   PASS
+    bitflip_decode        |t| = 0.17   PASS
+    kem_encap             |t| = 0.56   PASS
+    kem_decap             |t| = 0.38   PASS
+    argus_tail            |t| = 0.24   PASS
+    argus_tail_weight     |t| = 0.10   PASS
+    pubkey_from_sk        |t| = 0.40   PASS
+
+  All 14 targets PASS; max |t| = 1.10 (argus_tail, 128_2).
+
+Notes
+-----
+  Target classes (tools/dudect/targets_syndrome.c):
+    sample_fixed_weight  two distinct RNG streams -> two supports.
+    bitflip_decode       two distinct private syndromes; fixed iterMax=3,
+                         decode success vs failure indistinguishable.
+    kem_encap            two RNG streams -> two fresh weight-t errors.
+    kem_decap            valid vs tampered ciphertext (constant-time
+                         implicit rejection; the highest-value test).
+    argus_tail           openable weight-t vs unopenable weight-t (the
+                         openable-bit and support-position secrets).
+    argus_tail_weight    openable weight-t vs unopenable off-weight (7t/8)
+                         (the residual-weight axis: extract_indices must
+                         not vary with how many error bits are set).
+    pubkey_from_sk       two distinct secret keys -> M recompute.
+
+  A-M2 confirmation (SECURITY_REVIEW_1_0_0 section 12.6).  The Argus tail
+  is the target that leaked before the fix (clang >= 17 hoisted a
+  secret-dependent branch in extract_indices).  Post-fix the per-class
+  means track to within noise, e.g. argus_tail 128_2:
+    class A  mu = 11238.64  sigma = 121.76
+    class B  mu = 11238.04  sigma = 121.58   (delta 0.005%, |t| = 1.10)
+  and the residual-weight axis is flat:
+    argus_tail_weight 128_2  mu 11380.12 vs 11380.20   (|t| = 0.03)
+  i.e. identical control flow across input classes, no residual branch.
+
+  The constant-time guarantee is a property of the emitted machine code
+  and of THIS toolchain/flag set.  Do not add -flto: it can inline
+  ichor's out-of-line constant-time barriers (ichor_ct_mask64 and friends)
+  and reintroduce the A-M2 branch.  Re-run this suite and re-check the
+  disassembly after any compiler or flag change.
