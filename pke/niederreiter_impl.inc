@@ -73,7 +73,8 @@ syndrome_pke_encrypt(uint8_t *ct, const uint8_t *pk,
 
 void
 syndrome_pke_decrypt(uint64_t e[][SYNDROME_GF2X_LIMBS], int *ok,
-                     const syndrome_qcmdpc_sk *sk, const uint8_t *ct)
+                     const syndrome_qcmdpc_sk *sk, const uint8_t *ct,
+                     ichor_pool_t *pool)
 {
     uint64_t h[SYNDROME_N0][SYNDROME_GF2X_LIMBS];
     uint64_t s[SYNDROME_GF2X_LIMBS];
@@ -87,7 +88,7 @@ syndrome_pke_decrypt(uint64_t e[][SYNDROME_GF2X_LIMBS], int *ok,
     /* sp = h_{n0-1}*s = sum_b h_b*e_b (the private syndrome the decoder inverts). */
     syndrome_synmap_private(sp, h[SYNDROME_N0 - 1], s);
 
-    syndrome_bitflip_decode(e, ok, h, sk->cols, sp);
+    syndrome_bitflip_decode_ex(e, ok, h, sk->cols, sp, pool);
 
     ichor_secure_zero(h, sizeof(h));
     ichor_secure_zero(sp, sizeof(sp));
@@ -151,7 +152,7 @@ syndrome_niederreiter_selftest(void)
 
     /* Encrypt through the public key, decrypt through the private key. */
     syndrome_pke_encrypt(ct, pk, e);
-    syndrome_pke_decrypt(r, &ok, &sk, ct);
+    syndrome_pke_decrypt(r, &ok, &sk, ct, NULL);
 
     if (ok != 1)
         goto done;

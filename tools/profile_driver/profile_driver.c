@@ -43,6 +43,8 @@
 #include <string.h>
 #include <time.h>
 
+#include <ichor/pool.h>
+
 #include "talos_syndrome.h"
 
 #define WARMUP_ITERS 2
@@ -100,7 +102,7 @@ op_selected(const char *op, const char *name)
  */
 static int
 run_set(syndrome_set_id set, const char *name, uint8_t prim_id, size_t iters,
-        double *samples, const char *op)
+        double *samples, const char *op, const syndrome_opts_t *opts)
 {
     uint8_t pk[SYNDROME_MAX_PK_BYTES];
     uint8_t sk[SYNDROME_MAX_SK_BYTES];
@@ -157,11 +159,11 @@ run_set(syndrome_set_id set, const char *name, uint8_t prim_id, size_t iters,
     /* decap, against the last encap's ciphertext. */
     if (op_selected(op, "decap")) {
         for (w = 0; w < WARMUP_ITERS; w++)
-            if ((rc = syndrome_kem_decap(set, k_dec, ct, sk)) != 0)
+            if ((rc = syndrome_kem_decap_ex(set, k_dec, ct, sk, opts)) != 0)
                 goto op_failed;
         for (i = 0; i < iters; i++) {
             t0 = now_seconds();
-            rc = syndrome_kem_decap(set, k_dec, ct, sk);
+            rc = syndrome_kem_decap_ex(set, k_dec, ct, sk, opts);
             samples[i] = now_seconds() - t0;
             if (rc != 0)
                 goto op_failed;
@@ -183,15 +185,17 @@ run_set(syndrome_set_id set, const char *name, uint8_t prim_id, size_t iters,
         memset(tag, 0, tag_len);
         tag[0] = prim_id;
         for (w = 0; w < WARMUP_ITERS; w++) {
-            rc = syndrome_argus_open(set, identity, id_len, tag, tag_len, sk,
-                                     SYNDROME_ARGUS_TAG_SIGNATURE_VERIFIED);
+            rc = syndrome_argus_open_ex(set, identity, id_len, tag, tag_len, sk,
+                                        SYNDROME_ARGUS_TAG_SIGNATURE_VERIFIED,
+                                        opts);
             if (rc != SYNDROME_ARGUS_OK && rc != SYNDROME_ARGUS_EUNOPENABLE)
                 goto op_failed;
         }
         for (i = 0; i < iters; i++) {
             t0 = now_seconds();
-            rc = syndrome_argus_open(set, identity, id_len, tag, tag_len, sk,
-                                     SYNDROME_ARGUS_TAG_SIGNATURE_VERIFIED);
+            rc = syndrome_argus_open_ex(set, identity, id_len, tag, tag_len, sk,
+                                        SYNDROME_ARGUS_TAG_SIGNATURE_VERIFIED,
+                                        opts);
             samples[i] = now_seconds() - t0;
             if (rc != SYNDROME_ARGUS_OK && rc != SYNDROME_ARGUS_EUNOPENABLE)
                 goto op_failed;
@@ -222,12 +226,33 @@ main(int argc, char **argv)
          0x02}, /* 0x02 = Grostl-256 @ lambda 256 */
         {SYNDROME_SET_256_5, "256_5",
          0x02}, /* 0x02 = Grostl-256 @ lambda 256 */
+        {SYNDROME_SET_128_3, "128_3",
+         0x01}, /* 0x01 = AES-DM     @ lambda 128 */
+        {SYNDROME_SET_128_4, "128_4",
+         0x01}, /* 0x01 = AES-DM     @ lambda 128 */
+        {SYNDROME_SET_192_2, "192_2",
+         0x02}, /* 0x02 = Grostl-256 @ lambda 192 */
+        {SYNDROME_SET_192_3, "192_3",
+         0x02}, /* 0x02 = Grostl-256 @ lambda 192 */
+        {SYNDROME_SET_192_4, "192_4",
+         0x02}, /* 0x02 = Grostl-256 @ lambda 192 */
+        {SYNDROME_SET_192_5, "192_5",
+         0x02}, /* 0x02 = Grostl-256 @ lambda 192 */
+        {SYNDROME_SET_256_3, "256_3",
+         0x02}, /* 0x02 = Grostl-256 @ lambda 256 */
+        {SYNDROME_SET_256_4, "256_4",
+         0x02}, /* 0x02 = Grostl-256 @ lambda 256 */
     };
     const size_t nsets = sizeof sets / sizeof sets[0];
     size_t iters = DEFAULT_ITERS;
     const char *filter = NULL;
     const char *op = NULL;
     double *samples;
+    syndrome_opts_t opts;
+    const syndrome_opts_t *opts_ptr = NULL;
+    ichor_pool_t *borrowed = NULL;
+    unsigned threads = 0;
+    int borrow = 0;
     int any = 0;
     size_t s;
 
@@ -237,12 +262,20 @@ main(int argc, char **argv)
         if (*end != '\0' || v == 0 || v > MAX_ITERS) {
             fprintf(
                 stderr,
-                "usage: %s [iterations] [set] [op]\n"
+                "usage: %s [iterations] [set] [op] [threads] [pool]\n"
                 "  iterations: 1..%u (default %u)\n"
-                "  set:        128_2 | 128_5 | 256_2 | 256_5 (default all)\n"
+                "  set:        128_2 | 128_3 | 128_4 | 128_5 |\n"
+                "              192_2 | 192_3 | 192_4 | 192_5 |\n"
+                "              256_2 | 256_3 | 256_4 | 256_5 (default all)\n"
                 "  op:         keygen | encap | decap | argus (default all;\n"
                 "              prerequisites still run untimed for "
-                "isolation)\n",
+                "isolation)\n"
+                "  threads:    worker threads for decap / argus_open (0/1 =\n"
+                "              serial, the default; >1 uses the _ex API)\n"
+                "  pool:       literal 'pool' to supply ONE caller-owned pool\n"
+                "              (opts.pool) reused across every timed call;\n"
+                "              omitted = library creates+destroys an internal\n"
+                "              pool per call.  Needs threads > 1.\n",
                 argv[0], MAX_ITERS, DEFAULT_ITERS);
             return 2;
         }
@@ -259,15 +292,56 @@ main(int argc, char **argv)
             return 2;
         }
     }
+    if (argc >= 5) {
+        char *end;
+        unsigned long v = strtoul(argv[4], &end, 10);
+        if (*end != '\0' || v > 1024ul) {
+            fprintf(stderr, "threads: 0..1024 (0/1 = serial)\n");
+            return 2;
+        }
+        threads = (unsigned)v;
+    }
+    if (argc >= 6) {
+        if (strcmp(argv[5], "pool") != 0) {
+            fprintf(stderr, "pool: literal 'pool' or omit\n");
+            return 2;
+        }
+        borrow = 1;
+    }
+    if (borrow && threads <= 1u) {
+        fprintf(stderr, "pool mode needs threads > 1\n");
+        return 2;
+    }
+    if (threads > 1u) {
+        syndrome_opts_init(&opts);
+        opts.thread_count = threads;
+        /*
+         * pool mode: create one caller-owned pool and hang it on opts.pool, so
+         * the library borrows it for every timed call (thread spin-up paid once
+         * here, not per call).  A creation failure falls back to the per-call
+         * internal pool rather than aborting the benchmark.
+         */
+        if (borrow && ichor_pool_create(&borrowed, threads) == 0)
+            opts.pool = borrowed;
+        opts_ptr = &opts;
+    }
 
     samples = calloc(iters, sizeof *samples);
     if (samples == NULL) {
         fprintf(stderr, "out of memory for %zu samples\n", iters);
+        ichor_pool_destroy(borrowed);
         return 1;
     }
 
-    printf("syndrome profile driver: %zu iterations per op%s%s\n", iters,
+    printf("syndrome profile driver: %zu iterations per op%s%s", iters,
            op != NULL ? ", op=" : "", op != NULL ? op : "");
+    if (threads > 1u)
+        printf(", threads=%u", threads);
+    if (opts_ptr != NULL && opts.pool != NULL)
+        printf(", pool=borrowed");
+    else if (threads > 1u)
+        printf(", pool=per-call");
+    printf("\n");
 
     for (s = 0; s < nsets; s++) {
         if (!syndrome_set_enabled(sets[s].id))
@@ -276,13 +350,15 @@ main(int argc, char **argv)
             continue;
         any = 1;
         if (run_set(sets[s].id, sets[s].name, sets[s].prim_id, iters, samples,
-                    op) != 0) {
+                    op, opts_ptr) != 0) {
             free(samples);
+            ichor_pool_destroy(borrowed);
             return 1;
         }
     }
 
     free(samples);
+    ichor_pool_destroy(borrowed);
     if (!any) {
         fprintf(stderr, "no matching enabled set%s%s\n",
                 filter != NULL ? " for filter " : "",

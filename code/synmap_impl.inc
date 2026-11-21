@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Jason Crawford
  * SPDX-License-Identifier: AGPL-3.0-only
  *
- * syndrome.c - syndrome maps: public s = M * e^T and the private decoder
+ * synmap_impl.inc - syndrome maps: public s = M * e^T and the private decoder
  * input s' = H_{n0-1} * s.
  *
  * For n0 = 2:

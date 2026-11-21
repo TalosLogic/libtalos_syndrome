@@ -34,4 +34,6 @@ const syndrome_set_vtable syndrome_set_128_5 = {
     .kem_pubkey_from_sk = syndrome_kem_pubkey_from_sk_impl,
     .argus_seal_derand = syndrome_argus_seal_derand,
     .argus_open = syndrome_argus_open_impl,
+    .kem_decap_ex = syndrome_kem_decap_impl_ex,
+    .argus_open_ex = syndrome_argus_open_impl_ex,
 };

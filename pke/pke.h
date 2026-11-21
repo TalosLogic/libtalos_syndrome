@@ -56,7 +56,8 @@ static void syndrome_pke_encrypt(uint8_t *, const uint8_t *,
  * rejection, so decrypt is never a decode-failure oracle.
  */
 static void syndrome_pke_decrypt(uint64_t (*)[SYNDROME_GF2X_LIMBS], int *,
-                                 const syndrome_qcmdpc_sk *, const uint8_t *);
+                                 const syndrome_qcmdpc_sk *, const uint8_t *,
+                                 ichor_pool_t *);
 
 static int syndrome_niederreiter_selftest(void);
 

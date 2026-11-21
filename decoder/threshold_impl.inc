@@ -14,16 +14,13 @@
  * Pinned per-iteration flip thresholds for the active Long-Term parameter
  * set.  Indexed 0..SYNDROME_ITERMAX-1; caller accesses as thresholds[iter-1].
  *
- * Source: ePrint 2025/1043, Table 2 (Long-Term sets).
- *   (lambda 128, n0 2) p=13613 v=69  t=130: th = 41, 35, 35
- *   (lambda 256, n0 2) p=43451 v=135 t=261: th = 77, 69, 69
- *   (lambda 128, n0 5) p=7829  v=83  t=57 : th = 49, 42, 42
- *   (lambda 256, n0 5) p=24733 v=165 t=113: th = 93, 85, 84
- * All four rows are pinned from Table 2; iterMax=3 is fixed by the paper's
+ * Source: ePrint 2025/1043, Table 2 (Long-Term sets).  One arm per shipped
+ * (lambda, n0) in {128, 192, 256} x {2, 3, 4, 5}; the full table of (p, v, t,
+ * thresholds, -log2 DFR) is in DESIGN.md §3.  iterMax=3 is fixed by the paper's
  * decoder and thresholds are iteration-indexed only.  The closed-form
- * DFR <= 2^-lambda bound is established in DESIGN.md §3.2 (-log2 DFR =
- * 130.40 / 256.49 for the n0=5 sets); the Monte-Carlo decoder-fidelity check in
- * the waterfall regime is test_dfr_mc.c (subtask 2.4).
+ * DFR <= 2^-lambda bound is established and independently recomputed in
+ * DESIGN.md §3.2 (every row clears 2^-lambda with margin); the Monte-Carlo
+ * decoder-fidelity check in the waterfall regime is test_dfr_mc.c.
  */
 #if SYNDROME_LAMBDA == 128 && SYNDROME_N0 == 2
 static const unsigned thresholds[SYNDROME_ITERMAX] = {41, 35, 35};
@@ -33,6 +30,22 @@ static const unsigned thresholds[SYNDROME_ITERMAX] = {77, 69, 69};
 static const unsigned thresholds[SYNDROME_ITERMAX] = {49, 42, 42};
 #elif SYNDROME_LAMBDA == 256 && SYNDROME_N0 == 5
 static const unsigned thresholds[SYNDROME_ITERMAX] = {93, 85, 84};
+#elif SYNDROME_LAMBDA == 128 && SYNDROME_N0 == 3
+static const unsigned thresholds[SYNDROME_ITERMAX] = {45, 41, 40};
+#elif SYNDROME_LAMBDA == 128 && SYNDROME_N0 == 4
+static const unsigned thresholds[SYNDROME_ITERMAX] = {48, 41, 41};
+#elif SYNDROME_LAMBDA == 192 && SYNDROME_N0 == 2
+static const unsigned thresholds[SYNDROME_ITERMAX] = {60, 53, 52};
+#elif SYNDROME_LAMBDA == 192 && SYNDROME_N0 == 3
+static const unsigned thresholds[SYNDROME_ITERMAX] = {66, 60, 59};
+#elif SYNDROME_LAMBDA == 192 && SYNDROME_N0 == 4
+static const unsigned thresholds[SYNDROME_ITERMAX] = {70, 62, 61};
+#elif SYNDROME_LAMBDA == 192 && SYNDROME_N0 == 5
+static const unsigned thresholds[SYNDROME_ITERMAX] = {71, 66, 64};
+#elif SYNDROME_LAMBDA == 256 && SYNDROME_N0 == 3
+static const unsigned thresholds[SYNDROME_ITERMAX] = {87, 78, 78};
+#elif SYNDROME_LAMBDA == 256 && SYNDROME_N0 == 4
+static const unsigned thresholds[SYNDROME_ITERMAX] = {91, 82, 82};
 #else
 #error "no decoder thresholds for this (SYNDROME_LAMBDA, SYNDROME_N0)"
 #endif
@@ -69,6 +82,22 @@ syndrome_threshold_selftest(void)
     static const unsigned expected[SYNDROME_ITERMAX] = {49, 42, 42};
 #elif SYNDROME_LAMBDA == 256 && SYNDROME_N0 == 5
     static const unsigned expected[SYNDROME_ITERMAX] = {93, 85, 84};
+#elif SYNDROME_LAMBDA == 128 && SYNDROME_N0 == 3
+    static const unsigned expected[SYNDROME_ITERMAX] = {45, 41, 40};
+#elif SYNDROME_LAMBDA == 128 && SYNDROME_N0 == 4
+    static const unsigned expected[SYNDROME_ITERMAX] = {48, 41, 41};
+#elif SYNDROME_LAMBDA == 192 && SYNDROME_N0 == 2
+    static const unsigned expected[SYNDROME_ITERMAX] = {60, 53, 52};
+#elif SYNDROME_LAMBDA == 192 && SYNDROME_N0 == 3
+    static const unsigned expected[SYNDROME_ITERMAX] = {66, 60, 59};
+#elif SYNDROME_LAMBDA == 192 && SYNDROME_N0 == 4
+    static const unsigned expected[SYNDROME_ITERMAX] = {70, 62, 61};
+#elif SYNDROME_LAMBDA == 192 && SYNDROME_N0 == 5
+    static const unsigned expected[SYNDROME_ITERMAX] = {71, 66, 64};
+#elif SYNDROME_LAMBDA == 256 && SYNDROME_N0 == 3
+    static const unsigned expected[SYNDROME_ITERMAX] = {87, 78, 78};
+#elif SYNDROME_LAMBDA == 256 && SYNDROME_N0 == 4
+    static const unsigned expected[SYNDROME_ITERMAX] = {91, 82, 82};
 #else
 #error "no decoder thresholds for this (SYNDROME_LAMBDA, SYNDROME_N0)"
 #endif

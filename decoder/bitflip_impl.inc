@@ -22,6 +22,7 @@
  * DECODER_ROTATED_SYNDROME.md.
  */
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <ichor/util.h>
@@ -29,6 +30,7 @@
 #include "decoder.h"
 #include "core.h"
 #include "code.h"
+#include "ctr_dispatch.h"
 
 /*
  * BITFLIP_TOP_BITS: number of valid bits used in the top limb of a ring
@@ -144,34 +146,14 @@ ct_is_zero(const uint64_t *v)
 }
 
 /*
- * bitflip_ctr_add - add a 1-bit-per-position addend into the bit-sliced
- * counters: for every position m, ctr[*][m] += bit m of `add`.  Ripple-carry
- * across the planes with pure XOR/AND over whole ring elements.  The counters
- * are sized (BITFLIP_CTR_PLANES) so the running maximum V never overflows, so
- * the carry out of the top plane is always zero.  Control flow and memory
- * access depend only on the public constants BITFLIP_CTR_PLANES and LIMBS, so
- * this is constant-time over the (secret) counter and addend contents.
+ * The bit-sliced counter accumulate (for every position m, ctr[*][m] += bit m
+ * of `add`, ripple-carry across the planes) is the hot per-support-offset word
+ * loop, so it is the one decoder op with SIMD backends.  It lives in
+ * decoder/ctr_add.c as the dispatched syndrome_ctr_add (scalar floor +
+ * SSE2/AVX2/NEON, selected via ichor_cpu_features); compute_counters calls it
+ * below.  The counters are sized (BITFLIP_CTR_PLANES) so the running maximum V
+ * never overflows and the carry out of the top plane is always zero.
  */
-static void
-bitflip_ctr_add(uint64_t ctr[][SYNDROME_GF2X_LIMBS], const uint64_t *add)
-{
-    uint64_t carry[SYNDROME_GF2X_LIMBS];
-    unsigned p;
-    size_t j;
-
-    memcpy(carry, add, sizeof(carry));
-    for (p = 0; p < BITFLIP_CTR_PLANES; p++) {
-        for (j = 0; j < SYNDROME_GF2X_LIMBS; j++) {
-            uint64_t cout = ctr[p][j] & carry[j]; /* carry out of plane p */
-
-            ctr[p][j] ^= carry[j]; /* sum bit of plane p */
-            carry[j] = cout;
-        }
-    }
-    /* carry is all-zero here by the no-overflow sizing; wipe the scratch (it
-     * held a shifted copy of the secret syndrome on entry). */
-    ichor_secure_zero(carry, sizeof(carry));
-}
 
 /*
  * bitflip_ctr_ge - flip[m] = 1 iff the bit-sliced counter at position m is
@@ -249,6 +231,79 @@ compute_flip_dense(uint64_t *flip, const uint64_t *s, const uint64_t *hb,
     ichor_secure_zero(rot, sizeof(rot));
 }
 
+/* Words per bit-sliced counter: BITFLIP_CTR_PLANES planes x LIMBS limbs. */
+#define BITFLIP_CTR_WORDS                                                      \
+    ((size_t)BITFLIP_CTR_PLANES * (size_t)SYNDROME_GF2X_LIMBS)
+
+/*
+ * Threading context for the batched decode (compute_flips_all).  pool == NULL
+ * (or chunks <= 1, or a NULL ctx) selects the serial path; otherwise each
+ * iteration's n0 blocks are split into `chunks` contiguous V-ranges per block
+ * and run as n0 * chunks pool jobs, each accumulating its range into its own
+ * counter slot of wctr (n0 * chunks * BITFLIP_CTR_WORDS words), which are then
+ * merged per block.  wctr and the `jobs` descriptor array (n0 * chunks
+ * caller-owned ichor_job_info_t, used with ichor_pool_submit_jobs so dispatch
+ * allocates nothing) are both allocated once per decode in
+ * syndrome_bitflip_decode_ex, outside the per-iteration hot loop.
+ */
+typedef struct {
+    ichor_pool_t *pool;
+    unsigned chunks;
+    uint64_t *wctr;
+    ichor_job_info_t *jobs;
+} compute_ctx;
+
+/*
+ * Arguments shared by every (block, chunk) job of one batched dispatch (all n0
+ * blocks of one decoder iteration).  Job index j selects block b = j / chunks
+ * and chunk c = j % chunks; the job reads block b's support supp[b] and writes
+ * counter slot j.
+ */
+typedef struct {
+    const uint64_t *s;
+    const uint16_t (*supp)[SYNDROME_V]; /* n0 block supports: supp[b][k] */
+    uint64_t *wctr;                     /* n0 * chunks private counter slots */
+    unsigned chunks;                    /* chunks per block */
+    unsigned vlen;                      /* SYNDROME_V */
+} ctr_chunk_ud;
+
+/*
+ * One (block, chunk) job: accumulate chunk c's contiguous support range
+ * [kbeg, kend) of block b into its private counter slot wctr[j] (j = the
+ * descriptor index = b * chunks + c, pre-zeroed by the caller).  b, c and the
+ * range bounds are a public function of j, chunks and V, and the body is the
+ * same constant-time rotate + bit-sliced add as the serial loop, so the job is
+ * data-independent.  v is job-stack-local, so concurrent jobs never share it.
+ *
+ * Descriptor-job form (ichor_job_run_fn): `j` is the descriptor index (block *
+ * chunks + chunk); `jctx` is the per-invocation cancel handle, unused here
+ * (every job runs to completion, there is nothing to cancel).
+ */
+static int
+ctr_chunk_job(size_t j, void *udv, ichor_job_ctx_t *jctx)
+{
+    const ctr_chunk_ud *ud = (const ctr_chunk_ud *)udv;
+
+    (void)jctx;
+    unsigned chunks = ud->chunks;
+    unsigned b = (unsigned)(j / chunks);
+    unsigned c = (unsigned)(j % chunks);
+    const uint16_t *supp_b = ud->supp[b];
+    uint64_t *myctr = ud->wctr + (size_t)j * BITFLIP_CTR_WORDS;
+    uint64_t v[SYNDROME_GF2X_LIMBS];
+    unsigned kbeg = (unsigned)(((uint64_t)c * ud->vlen) / chunks);
+    unsigned kend = (unsigned)((((uint64_t)c + 1u) * ud->vlen) / chunks);
+    unsigned k;
+
+    for (k = kbeg; k < kend; k++) {
+        syndrome_gf2x_rotl_var(v, ud->s,
+                               (uint32_t)SYNDROME_P - (uint32_t)supp_b[k]);
+        syndrome_ctr_add(myctr, v, BITFLIP_CTR_PLANES, SYNDROME_GF2X_LIMBS);
+    }
+    ichor_secure_zero(v, sizeof(v));
+    return 0;
+}
+
 /*
  * compute_counters - accumulate one block's unsatisfied-parity-check counts
  * into the bit-sliced counters: ctr[m] = sum over the block's support offsets
@@ -258,23 +313,30 @@ compute_flip_dense(uint64_t *flip, const uint64_t *s, const uint64_t *hb,
  * the counters.  The loop bound V is public; the offset is secret but only
  * drives the constant-time rotation, so control flow and memory access are
  * data-independent.  See DECODER_ROTATED_SYNDROME.md.
+ *
+ * This is the serial single-block counter, used by the diff self-test and as
+ * the serial fallback (via compute_flip).  The threaded decode batches all n0
+ * blocks of an iteration into one dispatch in compute_flips_all, which reuses
+ * this same associative/commutative accumulation, so its merged result is
+ * byte-identical to this serial path for any chunk count (the KATs and
+ * determinism test hold).
  */
 static void
 compute_counters(uint64_t ctr[][SYNDROME_GF2X_LIMBS], const uint64_t *s,
-                 const uint16_t *supp)
+                 const uint16_t *supp, const compute_ctx *ctx)
 {
     uint64_t v[SYNDROME_GF2X_LIMBS];
     unsigned k;
 
-    memset(ctr, 0,
-           (size_t)BITFLIP_CTR_PLANES * SYNDROME_GF2X_LIMBS * sizeof(uint64_t));
+    (void)ctx;
+    memset(ctr, 0, BITFLIP_CTR_WORDS * sizeof(uint64_t));
     for (k = 0; k < (unsigned)SYNDROME_V; k++) {
-        /* v[m] = s[(m + supp[k]) mod p]; supp[k] in [0, p), so p - supp[k] is
-         * in [1, p] and supp[k] == 0 gives the identity rotation. */
+        /* v[m] = s[(m + supp[k]) mod p]; supp[k] in [0, p), so p - supp[k]
+         * is in [1, p] and supp[k] == 0 gives the identity rotation. */
         syndrome_gf2x_rotl_var(v, s, (uint32_t)SYNDROME_P - (uint32_t)supp[k]);
-        bitflip_ctr_add(ctr, v);
+        syndrome_ctr_add((uint64_t *)ctr, v, BITFLIP_CTR_PLANES,
+                         SYNDROME_GF2X_LIMBS);
     }
-
     ichor_secure_zero(v, sizeof(v));
 }
 
@@ -287,14 +349,112 @@ compute_counters(uint64_t ctr[][SYNDROME_GF2X_LIMBS], const uint64_t *s,
  */
 static void
 compute_flip(uint64_t *flip, const uint64_t *s, const uint16_t *supp,
-             unsigned th)
+             unsigned th, const compute_ctx *ctx)
 {
     uint64_t ctr[BITFLIP_CTR_PLANES][SYNDROME_GF2X_LIMBS];
 
-    compute_counters(ctr, s, supp);
+    compute_counters(ctr, s, supp, ctx);
     bitflip_ctr_ge(flip, ctr, th);
 
     ichor_secure_zero(ctr, sizeof(ctr));
+}
+
+/*
+ * compute_flips_all - compute the flip polynomials for ALL n0 blocks of one
+ * decoder iteration in a single pool dispatch.  Every block in an iteration
+ * reads the same (not-yet-updated) syndrome, so the blocks are independent and
+ * their chunk jobs batch into one submit_jobs / wait barrier instead of one per
+ * block (3 * n0 barriers per decode become 3).  Job index j maps to (block
+ * b = j / chunks, chunk c = j % chunks); job j accumulates block b's support
+ * range for chunk c into wctr slot j, then each block's chunks are merged and
+ * thresholded into flip[b].  The per-(block, chunk) accumulation covers exactly
+ * the same support offsets as the serial per-block loop and the merge is
+ * associative and commutative, so the result is byte-identical to the serial
+ * path for any chunk count (KATs / determinism test hold).  Serial fallback
+ * (no pool / single worker) runs compute_flip per block, unchanged.
+ */
+static void
+compute_flips_all(uint64_t flip[][SYNDROME_GF2X_LIMBS], const uint64_t *s,
+                  const uint16_t supp[][SYNDROME_V], unsigned th,
+                  const compute_ctx *ctx)
+{
+    uint32_t b;
+
+    if (ctx == NULL || ctx->pool == NULL || ctx->chunks <= 1u) {
+        for (b = 0; b < (uint32_t)SYNDROME_N0; b++)
+            compute_flip(flip[b], s, supp[b], th, ctx);
+        return;
+    }
+
+    {
+        const unsigned chunks = ctx->chunks;
+        const unsigned njobs = (unsigned)SYNDROME_N0 * chunks;
+        ctr_chunk_ud ud;
+        uint64_t label;
+        unsigned j;
+        int done, err;
+
+        /* Every (block, chunk) counter slot starts at zero. */
+        memset(ctx->wctr, 0,
+               (size_t)njobs * BITFLIP_CTR_WORDS * sizeof(uint64_t));
+        ud.s = s;
+        ud.supp = supp;
+        ud.wctr = ctx->wctr;
+        ud.chunks = chunks;
+        ud.vlen = (unsigned)SYNDROME_V;
+
+        /*
+         * One dispatch for all n0 blocks: njobs = n0 * chunks caller-owned
+         * descriptors (no per-job allocation), every descriptor sharing one ud.
+         * submit_jobs re-initialises each descriptor's pool-owned fields, so
+         * only fn / ud are set here, and the array is reused across the three
+         * iterations of the decode.
+         */
+        for (j = 0; j < njobs; j++) {
+            ctx->jobs[j].fn = ctr_chunk_job;
+            ctx->jobs[j].ud = &ud;
+        }
+        label = ichor_pool_new_label(ctx->pool);
+
+        /*
+         * A nonzero submit (e.g. ICHOR_POOL_ENOMEM on the group record) queues
+         * nothing, so no job references the stack-local ud: fall back to the
+         * serial per-block path (which needs no pool) rather than merge the
+         * still-zeroed wctr into empty flips.  Threading must never change a
+         * result, so a pool failure degrades to serial, not to a wrong decode.
+         */
+        if (ichor_pool_submit_jobs(ctx->pool, ctx->jobs, njobs, label) != 0) {
+            for (b = 0; b < (uint32_t)SYNDROME_N0; b++)
+                compute_flip(flip[b], s, supp[b], th, ctx);
+            return;
+        }
+
+        /*
+         * The group is now in flight against ud and the wctr slots, so it MUST
+         * drain before the merge reads wctr or this frame returns.  wait(-1)
+         * blocks until the label is idle; if it ever returns without draining
+         * (it cannot here: valid pool, fresh private label, sole waiter), fall
+         * back to a full pool drain so no worker still references ud / wctr.
+         */
+        if (ichor_pool_wait(ctx->pool, label, -1, &done, &err) != 0 || !done)
+            (void)ichor_pool_drain(ctx->pool, -1);
+
+        /* Per block: merge its chunks' counters, then threshold into flip[b]. */
+        for (b = 0; b < (uint32_t)SYNDROME_N0; b++) {
+            uint64_t ctr[BITFLIP_CTR_PLANES][SYNDROME_GF2X_LIMBS];
+            const uint64_t *base =
+                ctx->wctr + (size_t)b * chunks * BITFLIP_CTR_WORDS;
+            unsigned c;
+
+            memcpy(ctr, base, BITFLIP_CTR_WORDS * sizeof(uint64_t));
+            for (c = 1; c < chunks; c++)
+                syndrome_ctr_merge((uint64_t *)ctr,
+                                   base + (size_t)c * BITFLIP_CTR_WORDS,
+                                   BITFLIP_CTR_PLANES, SYNDROME_GF2X_LIMBS);
+            bitflip_ctr_ge(flip[b], ctr, th);
+            ichor_secure_zero(ctr, sizeof(ctr));
+        }
+    }
 }
 
 /*
@@ -319,15 +479,54 @@ compute_flip(uint64_t *flip, const uint64_t *s, const uint16_t *supp,
  * layer consumes through constant-time implicit rejection.
  */
 void
-syndrome_bitflip_decode(uint64_t e[][SYNDROME_GF2X_LIMBS], int *ok,
-                        const uint64_t h[][SYNDROME_GF2X_LIMBS],
-                        const uint16_t supp[][SYNDROME_V], const uint64_t *s_in)
+syndrome_bitflip_decode_ex(uint64_t e[][SYNDROME_GF2X_LIMBS], int *ok,
+                           const uint64_t h[][SYNDROME_GF2X_LIMBS],
+                           const uint16_t supp[][SYNDROME_V],
+                           const uint64_t *s_in, ichor_pool_t *pool)
 {
     uint64_t s[SYNDROME_GF2X_LIMBS];
     uint64_t flip[SYNDROME_N0][SYNDROME_GF2X_LIMBS];
     uint64_t tmp[SYNDROME_GF2X_LIMBS];
+    compute_ctx cctx;
     unsigned iter;
     uint32_t b;
+
+    /*
+     * One-shot per-decode threading setup: a non-NULL pool with more than one
+     * worker gets its per-(block, chunk) counters (chunk count per block capped
+     * at V, times n0 blocks) and its caller-owned job-descriptor array allocated
+     * once here, outside the per-iteration compute_flips_all calls.  A trivial
+     * pool or a calloc failure of either buffer degrades to the serial path
+     * (pool NULL), never an error.  Both buffers live only for this decode and
+     * are freed before return.
+     */
+    cctx.pool = NULL;
+    cctx.chunks = 1;
+    cctx.wctr = NULL;
+    cctx.jobs = NULL;
+    if (pool != NULL) {
+        unsigned w = ichor_pool_size(pool);
+
+        if (w > 1u) {
+            unsigned chunks =
+                (w > (unsigned)SYNDROME_V) ? (unsigned)SYNDROME_V : w;
+
+            cctx.wctr = calloc((size_t)SYNDROME_N0 * chunks * BITFLIP_CTR_WORDS,
+                               sizeof(uint64_t));
+            cctx.jobs =
+                calloc((size_t)SYNDROME_N0 * chunks, sizeof(*cctx.jobs));
+            if (cctx.wctr != NULL && cctx.jobs != NULL) {
+                cctx.pool = pool;
+                cctx.chunks = chunks;
+            } else {
+                /* Partial allocation: free what succeeded, run serially. */
+                free(cctx.wctr);
+                free(cctx.jobs);
+                cctx.wctr = NULL;
+                cctx.jobs = NULL;
+            }
+        }
+    }
 
     /* Initialise working syndrome (copy) and error estimates (zero). */
     memcpy(s, s_in, SYNDROME_GF2X_LIMBS * sizeof(uint64_t));
@@ -342,8 +541,7 @@ syndrome_bitflip_decode(uint64_t e[][SYNDROME_GF2X_LIMBS], int *ok,
          * syndrome (parallel bit-flip: flips within an iteration are based on
          * the syndrome not yet updated by flips in this iteration).
          */
-        for (b = 0; b < (uint32_t)SYNDROME_N0; b++)
-            compute_flip(flip[b], s, supp[b], th);
+        compute_flips_all(flip, s, supp, th, &cctx);
 
         /* Step 2: update error estimates e[b] ^= flip[b]. */
         for (b = 0; b < (uint32_t)SYNDROME_N0; b++)
@@ -363,6 +561,25 @@ syndrome_bitflip_decode(uint64_t e[][SYNDROME_GF2X_LIMBS], int *ok,
     ichor_secure_zero(s, sizeof(s));
     ichor_secure_zero(flip, sizeof(flip));
     ichor_secure_zero(tmp, sizeof(tmp));
+
+    /* The chunk counters held secret per-position counts; wipe and release.
+     * The job descriptors carry no secret (fn / ud / status words only), so a
+     * plain free suffices; cctx.jobs is NULL on the serial path (free no-op). */
+    if (cctx.wctr != NULL) {
+        ichor_secure_zero(cctx.wctr, (size_t)SYNDROME_N0 * cctx.chunks *
+                                         BITFLIP_CTR_WORDS * sizeof(uint64_t));
+        free(cctx.wctr);
+    }
+    free(cctx.jobs);
+}
+
+/* Serial decode: syndrome_bitflip_decode_ex with no thread pool. */
+static void
+syndrome_bitflip_decode(uint64_t e[][SYNDROME_GF2X_LIMBS], int *ok,
+                        const uint64_t h[][SYNDROME_GF2X_LIMBS],
+                        const uint16_t supp[][SYNDROME_V], const uint64_t *s_in)
+{
+    syndrome_bitflip_decode_ex(e, ok, h, supp, s_in, NULL);
 }
 
 int
@@ -538,9 +755,9 @@ syndrome_bitflip_ctr_selftest(void)
 
     memset(ctr, 0, sizeof(ctr));
     for (c = 0; c < base; c++)
-        bitflip_ctr_add(ctr, valid);
+        syndrome_ctr_add((uint64_t *)ctr, valid, BITFLIP_CTR_PLANES, L);
     for (c = 0; c < full - base; c++)
-        bitflip_ctr_add(ctr, B);
+        syndrome_ctr_add((uint64_t *)ctr, B, BITFLIP_CTR_PLANES, L);
 
     /* Each plane: ctr[p] = (bit_p(full) ? B : 0) | (bit_p(base) ? valid&~B : 0). */
     for (p = 0; p < BITFLIP_CTR_PLANES; p++) {
@@ -645,7 +862,7 @@ syndrome_bitflip_diff_selftest(void)
         syndrome_gf2x_load(hb, hbuf);
 
         /* Check 1: production counters vs dense popcount at every position. */
-        compute_counters(ctr, s, supp);
+        compute_counters(ctr, s, supp, NULL);
         memcpy(rot, hb, sizeof(rot));
         for (m = 0; m < (uint32_t)SYNDROME_P; m++) {
             uint32_t want = and_popcount(s, rot);
@@ -663,7 +880,7 @@ syndrome_bitflip_diff_selftest(void)
         for (it = 1; it <= SYNDROME_ITERMAX; it++) {
             unsigned th = syndrome_threshold(it);
 
-            compute_flip(fnew, s, supp, th);
+            compute_flip(fnew, s, supp, th, NULL);
             compute_flip_dense(fref, s, hb, th);
             for (i = 0; i < (uint32_t)SYNDROME_GF2X_LIMBS; i++)
                 if (fnew[i] != fref[i])

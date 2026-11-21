@@ -19,6 +19,8 @@
 
 #include <stdint.h>
 
+#include <ichor/pool.h> /* ichor_pool_t (threaded decap; NULL = serial) */
+
 #include "set_internal.h" /* syndrome_drbg (via core.h) and the SYNDROME_* sizes */
 
 /*
@@ -49,6 +51,16 @@ static int syndrome_kem_encap_derand(uint8_t ct[SYNDROME_CT_BYTES],
 static int syndrome_kem_decap_impl(uint8_t k[SYNDROME_SS_BYTES],
                                    const uint8_t ct[SYNDROME_CT_BYTES],
                                    const uint8_t sk[SYNDROME_SK_BYTES]);
+
+/*
+ * Threaded decap: syndrome_kem_decap_impl with an optional ichor pool (NULL =
+ * serial).  A non-NULL pool parallelises the internal decode; the shared secret
+ * is byte-identical for any pool.
+ */
+static int syndrome_kem_decap_impl_ex(uint8_t k[SYNDROME_SS_BYTES],
+                                      const uint8_t ct[SYNDROME_CT_BYTES],
+                                      const uint8_t sk[SYNDROME_SK_BYTES],
+                                      ichor_pool_t *pool);
 
 /*
  * syndrome_kem_pubkey_from_sk_impl: recompute the public key M from a serialized

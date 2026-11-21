@@ -367,7 +367,11 @@ argus_tail_setup(int cls, void *state)
     /* Class 0 openable (mask all-ones), class 1 unopenable (mask zero). */
     st->vmask = cls ? 0u : 0xFFFFFFFFu;
 
-    (void)syndrome_drbg_generate(&rng, st->dem, sizeof(st->dem));
+    /* One-shot on a freshly seeded DRBG, so generate cannot report reseed
+     * exhaustion here; the fail-closed branch keeps st->dem defined (and the
+     * timing class deterministic) should that ever change. */
+    if (syndrome_drbg_generate(&rng, st->dem, sizeof(st->dem)) != 0)
+        memset(st->dem, 0, sizeof(st->dem));
     syndrome_drbg_clear(&rng);
 }
 
@@ -434,7 +438,11 @@ argus_tail_weight_setup(int cls, void *state)
     /* Class 0 openable (mask all-ones), class 1 unopenable (mask zero). */
     st->vmask = cls ? 0u : 0xFFFFFFFFu;
 
-    (void)syndrome_drbg_generate(&rng, st->dem, sizeof(st->dem));
+    /* One-shot on a freshly seeded DRBG, so generate cannot report reseed
+     * exhaustion here; the fail-closed branch keeps st->dem defined (and the
+     * timing class deterministic) should that ever change. */
+    if (syndrome_drbg_generate(&rng, st->dem, sizeof(st->dem)) != 0)
+        memset(st->dem, 0, sizeof(st->dem));
     syndrome_drbg_clear(&rng);
 }
 

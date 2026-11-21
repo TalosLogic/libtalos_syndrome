@@ -50,6 +50,18 @@ typedef enum {
     SYNDROME_SET_128_5,     /* lambda 128, n0 5 (cheapest circuit)     */
     SYNDROME_SET_256_2,     /* lambda 256, n0 2                        */
     SYNDROME_SET_256_5,     /* lambda 256, n0 5                        */
+    /*
+     * Fill sets (n0 in {3, 4}) and the lambda-192 level.  Appended so the ids
+     * above stay fixed; the ordering here is additive, never a renumbering.
+     */
+    SYNDROME_SET_128_3, /* lambda 128, n0 3                        */
+    SYNDROME_SET_128_4, /* lambda 128, n0 4                        */
+    SYNDROME_SET_192_2, /* lambda 192, n0 2                        */
+    SYNDROME_SET_192_3, /* lambda 192, n0 3                        */
+    SYNDROME_SET_192_4, /* lambda 192, n0 4                        */
+    SYNDROME_SET_192_5, /* lambda 192, n0 5                        */
+    SYNDROME_SET_256_3, /* lambda 256, n0 3                        */
+    SYNDROME_SET_256_4, /* lambda 256, n0 4                        */
     SYNDROME_SET_COUNT
 } syndrome_set_id;
 
@@ -57,7 +69,9 @@ typedef enum {
  * Compile-time size ceilings over ALL sets the library can carry, for callers
  * that size fixed stack buffers.  A minimal build (fewer sets) never exceeds
  * these, so a buffer sized by SYNDROME_MAX_* is always large enough.  Governing
- * set noted per line (n0=5 sizes from the paper Long-Term table).
+ * set noted per line (n0=5 sizes from the paper Long-Term table).  The lambda-192
+ * level and the n0 in {3, 4} fill sets are all smaller on every axis than the
+ * governing sets below, so they do not raise any ceiling.
  */
 #define SYNDROME_MAX_PK_BYTES 12368 /* (n0-1)*ceil(p/8), max @ SYN_256_5 */
 #define SYNDROME_MAX_CT_BYTES 5432  /* ceil(p/8),        max @ SYN_256_2 */
@@ -80,6 +94,54 @@ size_t syndrome_ss_bytes(syndrome_set_id set);
 size_t syndrome_argus_id_max_bytes(syndrome_set_id set);
 
 /*
+ * Execution options for the _ex entry points (additive to the SP 800-227 base
+ * API; the base functions are these with default options).  Forward-compatible
+ * by a leading size: syndrome_opts_init stamps struct_size = sizeof the struct
+ * this header declares, and the library reads an appended field only when a
+ * caller's struct_size covers it, so a newer library stays binary-compatible
+ * with a caller compiled against an older (smaller) struct, and vice versa.
+ *
+ * Always initialise with syndrome_opts_init, then set fields:
+ *   syndrome_opts_t opts;
+ *   syndrome_opts_init(&opts);
+ *   opts.thread_count = 4;
+ *
+ * thread_count: maximum worker threads for the internally-parallelised decode
+ * (decap/argus_open).  0 or 1 means run serially (identical to the base API).
+ * The result is byte-identical for every thread_count, so it never affects
+ * correctness, only speed.  A NULL opts pointer to an _ex function means
+ * defaults (serial).
+ *
+ * pool: an optional caller-supplied ichor thread pool to borrow for the decode
+ * (borrow-or-create, mirroring libtalos_voleith's threading_opts).  When pool
+ * is non-NULL the library uses it and never destroys it (the caller owns its
+ * lifetime), so a caller making repeated decap/argus_open calls reuses one pool
+ * across calls instead of creating one per call; thread_count is then ignored.
+ * When pool is NULL the library creates an internal pool sized by thread_count
+ * for the call and destroys it before returning (the base behaviour).
+ *
+ * Both modes are fully supported and produce byte-identical results; NEITHER is
+ * promised to be faster.  Which one performs better is platform- and workload-
+ * dependent (per-call thread-creation cost versus pool-reuse wake behaviour
+ * differ across CPUs and schedulers), and this library makes no performance
+ * claim either way; a caller that cares should measure on its own target.
+ *
+ * struct ichor_pool is ichor's public thread-pool type (<ichor/pool.h>); a
+ * consumer already vendors ichor as a submodule, so no new dependency is
+ * introduced.
+ */
+struct ichor_pool;
+
+typedef struct {
+    size_t
+        struct_size; /* set by syndrome_opts_init (ABI guard); do not set by hand */
+    struct ichor_pool *pool; /* NULL = create internal; non-NULL = borrow */
+    unsigned thread_count;   /* 0/1 = serial; >1 = max worker threads */
+} syndrome_opts_t;
+
+void syndrome_opts_init(syndrome_opts_t *opts);
+
+/*
  * General KEM (NIST SP 800-227 shape).  Buffers are sized per the set: pk is
  * syndrome_pk_bytes(set), sk is syndrome_sk_bytes(set), ct is
  * syndrome_ct_bytes(set), k is syndrome_ss_bytes(set) (or the SYNDROME_MAX_*
@@ -96,6 +158,14 @@ int syndrome_kem_encap(syndrome_set_id set, uint8_t *ct, uint8_t *k,
                        const uint8_t *pk);
 int syndrome_kem_decap(syndrome_set_id set, uint8_t *k, const uint8_t *ct,
                        const uint8_t *sk);
+
+/*
+ * decap with execution options (opts may be NULL = serial defaults).  The
+ * shared secret written is byte-identical to syndrome_kem_decap for every
+ * opts.thread_count; opts only parallelises the internal decode.
+ */
+int syndrome_kem_decap_ex(syndrome_set_id set, uint8_t *k, const uint8_t *ct,
+                          const uint8_t *sk, const syndrome_opts_t *opts);
 
 /*
  * Seed-based key management (Proteus seed API; DESIGN.md §5).
@@ -251,6 +321,18 @@ int syndrome_argus_open(syndrome_set_id set, uint8_t *identity_out,
                         const uint8_t *sk, syndrome_argus_gate gate);
 
 /*
+ * argus_open with execution options (opts may be NULL = serial defaults).  The
+ * gate contract is unchanged (must be SYNDROME_ARGUS_TAG_SIGNATURE_VERIFIED).
+ * The recovered identity is byte-identical to syndrome_argus_open for every
+ * opts.thread_count; opts only parallelises the internal decode.
+ */
+int syndrome_argus_open_ex(syndrome_set_id set, uint8_t *identity_out,
+                           size_t identity_len, const uint8_t *tag,
+                           size_t tag_len, const uint8_t *sk,
+                           syndrome_argus_gate gate,
+                           const syndrome_opts_t *opts);
+
+/*
  * Library version, for ABI/diagnostic reporting.  This is the libtalos_syndrome
  * semantic version.  It is DECOUPLED from the Argus parameter-set-recipe version
  * carried in the DS IV (version_u24 = 1; see docs/DESIGN.md §6.2): the
@@ -259,7 +341,7 @@ int syndrome_argus_open(syndrome_set_id set, uint8_t *identity_out,
  * fixes, doc-only tags) without touching the recipe.
  */
 #define SYNDROME_VERSION_MAJOR 1
-#define SYNDROME_VERSION_MINOR 0
+#define SYNDROME_VERSION_MINOR 1
 #define SYNDROME_VERSION_PATCH 0
 const char *syndrome_version_string(void);
 

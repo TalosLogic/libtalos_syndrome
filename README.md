@@ -11,9 +11,11 @@ The library is named for the Niederreiter ciphertext, which is the **syndrome**
 parity-check matrix `M`. The name is scheme-neutral and survives a future
 code-family swap (QC-MDPC → Goppa).
 
-> **Status: 1.0.0.** All four parameter sets are implemented, validated against
-> pinned KATs, and constant-time-audited (dudect). `docs/DESIGN.md` is the
-> authoritative design record.
+> **Status: 1.0.0.** All twelve parameter sets
+> (`{λ128, λ192, λ256} × {n₀ 2, 3, 4, 5}`) are implemented and KAT-covered, each
+> with a per-set dudect constant-time target. `docs/DESIGN.md` is the
+> authoritative design record. (Version-file bump to 1.1.0 for the eight added
+> sets is pending.)
 
 ## Why this library
 
@@ -53,7 +55,7 @@ CLMUL) live in the vendored `libtalos_ichor` submodule.
 |-------|-------------|--------------------------------------------------------------------------|
 | 1     | `core/`     | circulant `F₂[x]/(xᵖ−1)` arithmetic, bit vectors, DRBG, constant-time fixed-weight sampling |
 | 2     | `code/`     | private sparse `H`, public systematic `M = H₍ₙ₀₋₁₎⁻¹ H`, syndrome maps   |
-| 3     | `decoder/`  | 3-iteration parallel bit-flipping decoder (Alg. 1), per-set thresholds   |
+| 3     | `decoder/`  | 3-iteration parallel bit-flipping decoder (Alg. 1), per-set thresholds; SSE2/AVX2/NEON bit-sliced counter kernels + optional threaded decode |
 | 4     | `pke/`      | Niederreiter PKE: keygen, encrypt, decrypt (Fig. 1)                      |
 | 5     | `kem/`      | KEM-DEM with an IND-CCA FO-style transform, constant-time implicit rejection |
 | 6     | `opener/`   | Argus designated-opener facility, built on `decap`                       |
@@ -104,25 +106,105 @@ decode-failure oracle would be a key-recovery oracle for QC-MDPC).
 > key is protected unconditionally regardless. See
 > [`docs/DESIGN.md`](docs/DESIGN.md) §6.
 
+### Threading
+
+`syndrome_kem_decap_ex` (and the Argus opener) take an optional
+`syndrome_opts_t` that parallelises the internal decode across an ichor thread
+pool. There are two supported ways to provide one, and the shared secret is
+byte-identical for both:
+
+- **Library-owned (default):** leave `opts->pool` `NULL` (or pass `opts == NULL`).
+  The library creates an internal pool sized by `thread_count` for the call and
+  destroys it before returning.
+- **Caller-provided:** set `opts->pool` to an `ichor_pool` you own. The library
+  borrows it and never destroys it, so repeated calls reuse one pool instead of
+  creating one per call; `thread_count` is then ignored.
+
+Both modes are fully supported; **neither pool mode is promised to be faster
+than the other.** Which one wins is platform- and workload-dependent (per-call
+thread-creation cost versus pool-reuse wake behaviour differ across CPUs and
+schedulers), so the library makes no claim between the two modes; if it matters,
+measure on your own target. How threaded decode compares to the serial baseline
+is shown under [Performance](#performance).
+
+The result is byte-identical at any thread count, and threading preserves the
+decoder's constant-time property. The internal parallelisation design (the
+support-loop partition, the byte-identical merge, and why it stays constant-time)
+is in [`docs/DESIGN.md` §4.10](docs/DESIGN.md#parallel-decode).
+
 ## Parameter sets
 
-Long-Term sets only (`DFR ≤ 2⁻λ`), selected at build time. Two block counts ship:
-`n₀ = 2` (smallest public key) and `n₀ = 5` (cheapest voleith circuit). The
-Ephemeral `2⁻⁶⁴` sets from the paper are deliberately not exposed. Sizes below
-are exact bytes.
+Long-Term sets only (`DFR ≤ 2⁻λ`), selected at build time. All twelve sets ship,
+`{λ128, λ192, λ256} × {n₀ 2, 3, 4, 5}`: `n₀ = 2` gives the smallest public key,
+`n₀ = 5` the cheapest voleith circuit, with `n₀ ∈ {3, 4}` between. The Ephemeral
+`2⁻⁶⁴` sets from the paper are deliberately not exposed. Sizes below are exact
+bytes.
 
 | set id           | λ   | n₀ | `p`   | `v` | `t` | pk    | ct   | sk   |
 |------------------|-----|----|-------|-----|-----|-------|------|------|
 | `SYNDROME_SET_128_2` | 128 | 2  | 13613 | 69  | 130 | 1702  | 1702 | 340  |
+| `SYNDROME_SET_128_3` | 128 | 3  | 10037 | 77  | 83  | 2510  | 1255 | 526  |
+| `SYNDROME_SET_128_4` | 128 | 4  | 8627  | 81  | 66  | 3237  | 1079 | 712  |
 | `SYNDROME_SET_128_5` | 128 | 5  | 7829  | 83  | 57  | 3916  | 979  | 894  |
+| `SYNDROME_SET_192_2` | 192 | 2  | 26813 | 103 | 195 | 3352  | 3352 | 508  |
+| `SYNDROME_SET_192_3` | 192 | 3  | 19709 | 115 | 124 | 4928  | 2464 | 786  |
+| `SYNDROME_SET_192_4` | 192 | 4  | 16829 | 121 | 98  | 6312  | 2104 | 1064 |
+| `SYNDROME_SET_192_5` | 192 | 5  | 15373 | 125 | 85  | 7688  | 1922 | 1346 |
 | `SYNDROME_SET_256_2` | 256 | 2  | 43451 | 135 | 261 | 5432  | 5432 | 668  |
+| `SYNDROME_SET_256_3` | 256 | 3  | 32069 | 153 | 165 | 8018  | 4009 | 1046 |
+| `SYNDROME_SET_256_4` | 256 | 4  | 27437 | 161 | 131 | 10290 | 3430 | 1416 |
 | `SYNDROME_SET_256_5` | 256 | 5  | 24733 | 165 | 113 | 12368 | 3092 | 1778 |
 
-The Proteus root seed is 2λ bits (32 B @ λ128 / 64 B @ λ256); the persisted
-self-describing blob adds an 8-byte header. λ = 192 and `n₀ ∈ {3, 4}` are
-reference-only additive future sets. Decoder thresholds are pinned per set;
-changing a parameter without re-deriving thresholds and re-validating the DFR
-bound is a security bug. See [`docs/DESIGN.md`](docs/DESIGN.md) §3.
+The Proteus root seed is 2λ bits (32 B @ λ128 / 48 B @ λ192 / 64 B @ λ256); the
+persisted self-describing blob adds an 8-byte header. Decoder thresholds are
+pinned per set; changing a parameter without re-deriving thresholds and
+re-validating the DFR bound is a security bug. See
+[`docs/DESIGN.md`](docs/DESIGN.md) §3.
+
+## Performance
+
+Measured on a Core i9 via `tools/profile_driver`, median of 5000 iterations per
+op. These are illustrative throughput figures on one machine, not guarantees;
+measure on your own target. Set ids are abbreviated `λ_n₀` (see the table above).
+
+Serial (single thread):
+
+| set   | keypair | encap | decap | argus_open |
+|-------|---------|-------|-------|------------|
+| 128_2 | 802     | 7800  | 825   | 510        |
+| 128_3 | 1070    | 8349  | 656   | 483        |
+| 128_4 | 1284    | 7970  | 609   | 464        |
+| 128_5 | 1251    | 7254  | 522   | 416        |
+| 192_2 | 311     | 3804  | 294   | 196        |
+| 192_3 | 420     | 3962  | 243   | 177        |
+| 192_4 | 513     | 3683  | 218   | 168        |
+| 192_5 | 572     | 3312  | 182   | 144        |
+| 256_2 | 156     | 2158  | 129   | 85         |
+| 256_3 | 225     | 2143  | 117   | 84         |
+| 256_4 | 270     | 2023  | 96    | 76         |
+| 256_5 | 311     | 1857  | 90    | 72         |
+
+Figures are op/s (higher is better). `keypair` and `encap` are single-threaded
+and unaffected by the threading options below.
+
+Threaded decode speedup over the serial figures above (8 threads, library-owned
+per-call pool). Only `decap` and `argus_open` parallelise; threaded timings vary
+more run-to-run, so these are representative, not peak:
+
+| set   | decap | argus_open |
+|-------|-------|------------|
+| 128_2 | 1.3×  | 1.1×       |
+| 128_3 | 1.7×  | 1.4×       |
+| 128_4 | 1.6×  | 1.4×       |
+| 128_5 | 1.7×  | 1.4×       |
+| 192_2 | 1.8×  | 1.4×       |
+| 192_3 | 2.1×  | 1.7×       |
+| 192_4 | 2.0×  | 1.7×       |
+| 192_5 | 2.1×  | 1.7×       |
+| 256_2 | 1.9×  | 1.4×       |
+| 256_3 | 2.3×  | 1.6×       |
+| 256_4 | 2.5×  | 1.8×       |
+| 256_5 | 2.4×  | 1.9×       |
 
 ## Building
 
@@ -135,7 +217,7 @@ cmake --build build
 ctest --test-dir build/tests      # runs the test harness
 ```
 
-By default all four sets are built. Trim the build with a semicolon-separated
+By default all twelve sets are built. Trim the build with a semicolon-separated
 token list:
 
 | Option                  | Default | Meaning                                                         |
@@ -144,10 +226,14 @@ token list:
 | `SYNDROME_BUILD_TESTING`| `ON`    | Build the test harness into `build/tests/`                      |
 | `SYNDROME_BUILD_DUDECT` | `OFF`   | Build the per-set dudect constant-time timing harness (`tools/dudect/`) |
 
-SIMD acceleration (PCLMULQDQ/PMULL, AES-NI/ARMv8 AES) and its portable software
-fallback live entirely in `libtalos_ichor`, which selects the backend at runtime
-and validates HW/fallback parity in its own suite; syndrome carries no hardware
-intrinsics of its own.
+SIMD acceleration for the circulant ring and symmetric primitives
+(PCLMULQDQ/PMULL, AES-NI/ARMv8 AES, and the gf2x AVX2/SSE2/NEON kernels) lives in
+`libtalos_ichor`, which selects the backend at runtime and validates HW/fallback
+parity in its own suite. The decoder adds its own runtime-dispatched
+SSE2/AVX2/NEON kernels for the hot bit-sliced counter accumulate
+(`decoder/ctr_add.c`), each bit-identical to the constant-time scalar floor and
+gated behind the same CPU-feature detection; the scalar path is always compiled
+in as the portable, constant-time baseline.
 
 ## Security model
 

@@ -29,15 +29,20 @@
  *            the bare ichor extractor:
  *              lambda=128: AES-128 Davies-Meyer, IV = ARGUS_DS_IV (16 B);
  *                          root = final chaining value                  (16 B)
+ *              lambda=192: Grostl-256, IV = ARGUS_DS_IV zero-padded to 64 B;
+ *                          root = output transform, leading 24 B        (24 B)
  *              lambda=256: Grostl-256, IV = ARGUS_DS_IV zero-padded to 64 B;
  *                          root = truncated output transform            (32 B)
+ *            (lambda-192 and lambda-256 share the Grostl-256 hash but are
+ *            domain-separated by ARGUS_DS_LAMBDA_BYTE, 0x18 vs 0x20, in the IV.)
  *            ichor owns the framing (ichor_aesdm_* / ichor_grostl_*); the DS IV
  *            and packing width live here (ichor is opener-agnostic).  Why
  *            AES/Grostl and not SHAKE, why Grostl-256 not Hirose, and why
  *            collision resistance is not load-bearing: DESIGN.md §6.1.
  *   - DEM:   one-time pad.  When identity_len <= lambda bytes the pad is root
- *            directly; when it is longer, root keys AES-CTR (AES-128 @ lambda128
- *            / AES-256 @ lambda256) under the fixed label ARGUS_CTR_LABEL and the
+ *            directly; when it is longer, root keys AES-CTR (AES-128 / AES-192 /
+ *            AES-256 at lambda 128 / 192 / 256) under the fixed label
+ *            ARGUS_CTR_LABEL and the
  *            keystream is the pad (DESIGN.md §6.2).  identity = ct XOR
  *            pad.  One-time-pad validity rests on the fresh-e-per-encap rule
  *            (§4.2): root, hence the pad, never repeats.  identity_len is public,
@@ -63,6 +68,7 @@
 
 #include <ichor/aes.h>
 #include <ichor/aesdm.h>
+#include <ichor/gf2x.h>
 #include <ichor/grostl.h>
 #include <ichor/util.h>
 
@@ -96,8 +102,8 @@ _Static_assert((SYNDROME_N - 1u) < (1u << ARGUS_IDX_BITS),
  * domain-separated:
  *   "TALOS"(5) || "Argus"(5) || lambda-in-bytes(1) || primitive-id(1) ||
  *   n0(1) || version u24 big-endian(3).
- * The lambda byte re-encodes the extractor output length (0x10 / 0x20); the
- * primitive id selects AES-DM (0x01) vs Grostl-256 (0x02); the n0 byte is the
+ * The lambda byte re-encodes the extractor output length (0x10 / 0x18 / 0x20);
+ * the primitive id selects AES-DM (0x01) vs Grostl-256 (0x02); the n0 byte is the
  * literal block count (it claims the high byte of the former version u32, so
  * the version is now 24-bit).  For AES-DM this is the whole 16-byte IV; for
  * Grostl-256 it is zero-padded to 64 bytes.  Changing any byte is a
@@ -107,9 +113,14 @@ _Static_assert((SYNDROME_N - 1u) < (1u << ARGUS_IDX_BITS),
 #if SYNDROME_LAMBDA == 128
 #define ARGUS_DS_LAMBDA_BYTE 0x10u
 #define ARGUS_DS_PRIM_ID 0x01u
-#else
+#elif SYNDROME_LAMBDA == 192
+#define ARGUS_DS_LAMBDA_BYTE 0x18u
+#define ARGUS_DS_PRIM_ID 0x02u
+#elif SYNDROME_LAMBDA == 256
 #define ARGUS_DS_LAMBDA_BYTE 0x20u
 #define ARGUS_DS_PRIM_ID 0x02u
+#else
+#error "no Argus KDF domain separation for this SYNDROME_LAMBDA"
 #endif
 #define ARGUS_DS_N0_BYTE ((uint8_t)(SYNDROME_N0))
 static const uint8_t ARGUS_DS_IV[16] = {
@@ -191,38 +202,24 @@ extract_indices(uint32_t idx[SYNDROME_T],
                 const uint8_t eb[][SYNDROME_BLOCK_BYTES])
 {
     uint32_t count = 0; /* set bits seen so far == next output slot */
-    uint32_t b, pos, j;
+    uint32_t b, j;
 
     for (j = 0; j < (uint32_t)SYNDROME_T; j++)
         idx[j] = 0;
 
-    for (b = 0; b < (uint32_t)SYNDROME_N0; b++) {
-        const uint8_t *e = eb[b];
-        uint32_t base = b * (uint32_t)SYNDROME_P;
-
-        for (pos = 0; pos < (uint32_t)SYNDROME_P; pos++) {
-            uint32_t bit = (uint32_t)((e[pos >> 3] >> (pos & 7u)) & 1u);
-            /*
-             * Route the per-bit gate through ichor's opaque mask.  With the
-             * plain (0u - bit) below, clang >= 17 proves the term is 0 when
-             * bit == 0 and hoists a secret-dependent branch that skips the
-             * inner masked write, leaking the support (dudect |t| ~3000-4900
-             * on clang 17/19; gcc 14 and clang 14 stay branch-free).  The
-             * out-of-line ichor_ct_mask64 the compiler cannot see through
-             * keeps the blend unconditional; relies on ichor_ct_mask64 staying
-             * out-of-line, i.e. no LTO on the release build.
-             */
-            uint32_t bitmask = (uint32_t)ichor_ct_mask64(bit);
-            uint32_t global = base + pos;
-
-            for (j = 0; j < (uint32_t)SYNDROME_T; j++) {
-                uint32_t sel = bitmask & ct_mask_eq32(count, j);
-
-                idx[j] = (idx[j] & ~sel) | (global & sel);
-            }
-            count += bit;
-        }
-    }
+    /*
+     * The oblivious compaction itself is the shared, runtime-dispatched ichor
+     * kernel ichor_gf2x_compact (the inverse of the encap-side scatter): it
+     * scans each circulant block, places every set bit's global position into
+     * output slot `count` under a constant-time slot sweep, and threads `count`
+     * from one block to the next.  The constant-time discipline (opaque per-bit
+     * mask via ichor_ct_mask64 to defeat the clang >= 17 branch hoist, no
+     * secret-indexed access) lives in that kernel; see ichor/gf2x.h.
+     */
+    for (b = 0; b < (uint32_t)SYNDROME_N0; b++)
+        count = ichor_gf2x_compact(
+            idx, (uint32_t)SYNDROME_T, eb[b], SYNDROME_BLOCK_BYTES,
+            b * (uint32_t)SYNDROME_P, (uint32_t)SYNDROME_P, count);
 }
 
 /*
@@ -248,7 +245,7 @@ argus_kdf(uint8_t root[SYNDROME_ARGUS_KEY_BYTES],
         ichor_aesdm_finalize_fixed(&ctx, root);
         ichor_aesdm_clear(&ctx);
     }
-#else
+#elif SYNDROME_LAMBDA == 256
     {
         ichor_grostl_ctx_t ctx;
         uint8_t iv[64];
@@ -260,6 +257,32 @@ argus_kdf(uint8_t root[SYNDROME_ARGUS_KEY_BYTES],
         ichor_grostl_finalize_fixed(&ctx, root);
         ichor_grostl_clear(&ctx);
     }
+#elif SYNDROME_LAMBDA == 192
+    {
+        /*
+         * lambda-192 has no AES-DM (16-byte output is too short) and no native
+         * 24-byte Grostl: the in-circuit KDF is Grostl-256 (prim_id 0x02) with
+         * its 32-byte output truncated to the leading SYNDROME_ARGUS_KEY_BYTES
+         * (24) = the 192-bit DEM key.  Domain-separated from lambda-256 by
+         * ARGUS_DS_LAMBDA_BYTE (0x18 vs 0x20) in the IV, so the two never
+         * collide.  Truncating a hash output to its leading bytes is standard;
+         * the discarded tail carries no additional key material.
+         */
+        ichor_grostl_ctx_t ctx;
+        uint8_t iv[64];
+        uint8_t full[32];
+
+        memset(iv, 0, sizeof(iv));
+        memcpy(iv, ARGUS_DS_IV, sizeof(ARGUS_DS_IV));
+        ichor_grostl256_init_iv(&ctx, iv);
+        ichor_grostl_absorb(&ctx, msg, sizeof(msg));
+        ichor_grostl_finalize_fixed(&ctx, full);
+        ichor_grostl_clear(&ctx);
+        memcpy(root, full, SYNDROME_ARGUS_KEY_BYTES);
+        ichor_secure_zero(full, sizeof(full));
+    }
+#else
+#error "no Argus KDF hash for this SYNDROME_LAMBDA"
 #endif
     ichor_secure_zero(msg, sizeof(msg));
 }
@@ -414,9 +437,10 @@ argus_tail(uint8_t *identity_out, size_t identity_len, const uint8_t *dem,
 }
 
 int
-syndrome_argus_open_impl(uint8_t *identity_out, size_t identity_len,
-                         const uint8_t *tag, size_t tag_len,
-                         const uint8_t sk[SYNDROME_SK_BYTES])
+syndrome_argus_open_impl_ex(uint8_t *identity_out, size_t identity_len,
+                            const uint8_t *tag, size_t tag_len,
+                            const uint8_t sk[SYNDROME_SK_BYTES],
+                            ichor_pool_t *pool)
 {
     syndrome_qcmdpc_sk qsk;
     uint64_t r[SYNDROME_N0][SYNDROME_GF2X_LIMBS];
@@ -464,7 +488,7 @@ syndrome_argus_open_impl(uint8_t *identity_out, size_t identity_len,
     sk_bad = deserialize_h(&qsk, sk);
 
     /* Recover e; ok == "M*e'^T == s" (decoder residual private syndrome zero). */
-    syndrome_pke_decrypt(r, &ok, &qsk, s);
+    syndrome_pke_decrypt(r, &ok, &qsk, s, pool);
     for (b = 0; b < (uint32_t)SYNDROME_N0; b++)
         syndrome_gf2x_store(eb[b], r[b]);
 
@@ -500,4 +524,14 @@ syndrome_argus_open_impl(uint8_t *identity_out, size_t identity_len,
     ichor_secure_zero(r, sizeof(r));
     ichor_secure_zero(eb, sizeof(eb));
     return ret;
+}
+
+/* Serial open: syndrome_argus_open_impl_ex with no thread pool. */
+int
+syndrome_argus_open_impl(uint8_t *identity_out, size_t identity_len,
+                         const uint8_t *tag, size_t tag_len,
+                         const uint8_t sk[SYNDROME_SK_BYTES])
+{
+    return syndrome_argus_open_impl_ex(identity_out, identity_len, tag, tag_len,
+                                       sk, NULL);
 }

@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(libtalos_syndrome
-    VERSION 1.0.0
+    VERSION 1.1.0
     DESCRIPTION "Clean-room QC-MDPC Niederreiter post-quantum KEM (ePrint 2025/1043)"
     LANGUAGES C)
 
@@ -24,7 +24,7 @@ endif()
 #
 #
 # Set-selection (liboqs OQS_MINIMAL_BUILD analog).  The library carries a
-# caller-selected subset of the four (lambda, n0) sets.  SYNDROME_MINIMAL_BUILD
+# caller-selected subset of the (lambda, n0) sets.  SYNDROME_MINIMAL_BUILD
 # is a ';'-separated token list; empty or OFF means "all sets".  Token grammar:
 # SYN_<lambda>_<n0>.  Downstream per-set compilation and the dispatch registry
 # iterate the surviving SYNDROME_ENABLE_SYN_* flags.
@@ -32,12 +32,24 @@ endif()
 set(SYNDROME_MINIMAL_BUILD "" CACHE STRING
     "';'-separated list of sets to build (e.g. SYN_128_2;SYN_256_5); empty = all")
 
-set(SYNDROME_ALL_SETS SYN_128_2 SYN_128_5 SYN_256_2 SYN_256_5)
+set(SYNDROME_ALL_SETS
+    SYN_128_2 SYN_128_5 SYN_256_2 SYN_256_5
+    SYN_128_3 SYN_128_4
+    SYN_192_2 SYN_192_3 SYN_192_4 SYN_192_5
+    SYN_256_3 SYN_256_4)
 
 option(SYNDROME_ENABLE_SYN_128_2 "Build the (lambda=128, n0=2) set" ON)
 option(SYNDROME_ENABLE_SYN_128_5 "Build the (lambda=128, n0=5) set" ON)
 option(SYNDROME_ENABLE_SYN_256_2 "Build the (lambda=256, n0=2) set" ON)
 option(SYNDROME_ENABLE_SYN_256_5 "Build the (lambda=256, n0=5) set" ON)
+option(SYNDROME_ENABLE_SYN_128_3 "Build the (lambda=128, n0=3) set" ON)
+option(SYNDROME_ENABLE_SYN_128_4 "Build the (lambda=128, n0=4) set" ON)
+option(SYNDROME_ENABLE_SYN_192_2 "Build the (lambda=192, n0=2) set" ON)
+option(SYNDROME_ENABLE_SYN_192_3 "Build the (lambda=192, n0=3) set" ON)
+option(SYNDROME_ENABLE_SYN_192_4 "Build the (lambda=192, n0=4) set" ON)
+option(SYNDROME_ENABLE_SYN_192_5 "Build the (lambda=192, n0=5) set" ON)
+option(SYNDROME_ENABLE_SYN_256_3 "Build the (lambda=256, n0=3) set" ON)
+option(SYNDROME_ENABLE_SYN_256_4 "Build the (lambda=256, n0=4) set" ON)
 
 # Force every set OFF, then re-enable exactly the listed tokens.  Errors on an
 # unknown token and on an empty (zero-set) result.
@@ -73,13 +85,17 @@ message(STATUS "syndrome sets (enabled): ${_syndrome_enabled_sets}")
 
 #
 # Map enabled sets to per-set wrapper TUs.  A wrapper is compiled only for a set
-# that is both enabled and IMPLEMENTED.  All four (lambda, n0) sets are
+# that is both enabled and IMPLEMENTED.  All listed (lambda, n0) sets are
 # implemented; a set that is enabled but not in this list is reported and skipped
 # rather than failing the configure.  Each compiled wrapper gets
-# SYNDROME_BUILT_SYN_<set>=1, which the dispatch (syndrome.c) and set_vtable.h
+# SYNDROME_BUILT_SYN_<set>=1, which the dispatch (core/syndrome.c) and set_vtable.h
 # key on.
 #
-set(SYNDROME_IMPLEMENTED_SETS SYN_128_2 SYN_128_5 SYN_256_2 SYN_256_5)
+set(SYNDROME_IMPLEMENTED_SETS
+    SYN_128_2 SYN_128_5 SYN_256_2 SYN_256_5
+    SYN_128_3 SYN_128_4
+    SYN_192_2 SYN_192_3 SYN_192_4 SYN_192_5
+    SYN_256_3 SYN_256_4)
 set(_syndrome_wrappers "")
 set(_syndrome_built_defs "")
 set(SYNDROME_BUILT_SETNUMS "") # "<lambda>_<n0>" tokens, for the test harness
@@ -444,6 +460,69 @@ endif()
 message(STATUS "ichor ${ICHOR_VERSION} (supported range [${SYNDROME_ICHOR_VERSION_MIN}, ${SYNDROME_ICHOR_VERSION_MAX}))")
 
 #
+# Decoder counter-accumulate SIMD backends (ctr_add).  Each probe checks that
+# its intrinsics compile under the per-TU ISA flag, so the flag is never emitted
+# on a toolchain that lacks it; the scalar floor in ctr_add.c always remains and
+# the backends are runtime-gated via ichor_cpu_features() there.  SSE2 is
+# x86_64 baseline, so it is selected by compile presence (no runtime bit),
+# matching ichor's gf2x dispatch.
+#
+option(SYNDROME_CTR_SSE2 "Compile the SSE2 decoder counter-accumulate backend (x86_64)" ON)
+if(SYNDROME_CTR_SSE2)
+    include(CheckCSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "-msse2")
+    check_c_source_compiles("
+        #include <emmintrin.h>
+        int main(void) {
+            __m128i a = _mm_set1_epi64x(3);
+            __m128i b = _mm_set1_epi64x(5);
+            __m128i r = _mm_xor_si128(_mm_and_si128(a, b), a);
+            return _mm_cvtsi128_si32(r);
+        }
+    " SYNDROME_HAVE_CTR_SSE2)
+    unset(CMAKE_REQUIRED_FLAGS)
+endif()
+
+option(SYNDROME_CTR_AVX2 "Compile the AVX2 decoder counter-accumulate backend (x86_64)" ON)
+if(SYNDROME_CTR_AVX2)
+    include(CheckCSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "-mavx2")
+    check_c_source_compiles("
+        #include <immintrin.h>
+        int main(void) {
+            __m256i a = _mm256_set1_epi64x(3);
+            __m256i b = _mm256_set1_epi64x(5);
+            __m256i r = _mm256_xor_si256(_mm256_and_si256(a, b), a);
+            return _mm256_extract_epi32(r, 0);
+        }
+    " SYNDROME_HAVE_CTR_AVX2)
+    unset(CMAKE_REQUIRED_FLAGS)
+endif()
+
+# NEON has no arch flag (Advanced SIMD is baseline on aarch64); the #error pins
+# the probe to aarch64 so SYNDROME_HAVE_CTR_NEON is never set on 32-bit ARM
+# (whose NEON is optional and which the dispatch leaves on scalar via
+# ICHOR_CPU_NEON, set only on aarch64).
+option(SYNDROME_CTR_NEON "Compile the NEON decoder counter-accumulate backend (aarch64)" ON)
+if(SYNDROME_CTR_NEON)
+    include(CheckCSourceCompiles)
+    check_c_source_compiles("
+        #include <stdint.h>
+        #include <arm_neon.h>
+        #if !defined(__aarch64__)
+        #error syndrome ctr NEON backend targets aarch64
+        #endif
+        int main(void) {
+            uint64_t buf[2] = {3, 5};
+            uint64x2_t a = vld1q_u64(buf);
+            a = veorq_u64(vandq_u64(a, a), a);
+            vst1q_u64(buf, a);
+            return (int)buf[0];
+        }
+    " SYNDROME_HAVE_CTR_NEON)
+endif()
+
+#
 # The library.  One static archive: the two parameter-free shared TUs (DRBG +
 # bit vectors), the public dispatch layer, and one wrapper TU per enabled +
 # implemented set.  Each wrapper #includes the generic *_impl.inc bodies with
@@ -453,7 +532,12 @@ message(STATUS "ichor ${ICHOR_VERSION} (supported range [${SYNDROME_ICHOR_VERSIO
 add_library(talos_syndrome STATIC
     core/bitvec.c
     core/rng.c
-    syndrome.c
+    decoder/ctr_add.c
+    decoder/ctr_add_sse2.c
+    decoder/ctr_add_avx2.c
+    decoder/ctr_add_neon.c
+    decoder/ctr_merge.c
+    core/syndrome.c
     ${_syndrome_wrappers})
 
 # Each per-set wrapper force-includes set_bodies.inc (the full impl-body bundle)
@@ -461,7 +545,8 @@ add_library(talos_syndrome STATIC
 # (syndrome_*_selftest) are intentionally dead in the library and trip
 # -Wunused-function.  Suppress it for the wrapper TUs only -- exactly as the
 # per-set test targets do (tests/CMakeLists.txt) -- keeping full unused-function
-# checking on the real library sources (core/*, syndrome.c).
+# checking on the real library sources (core/*, which includes the dispatch
+# layer core/syndrome.c, and decoder/*).
 set_source_files_properties(${_syndrome_wrappers} PROPERTIES
     COMPILE_OPTIONS -Wno-unused-function)
 
@@ -476,6 +561,24 @@ target_include_directories(talos_syndrome
             ${CMAKE_CURRENT_SOURCE_DIR}/sets)
 
 target_compile_definitions(talos_syndrome PRIVATE ${_syndrome_built_defs})
+
+# Decoder counter-accumulate SIMD: define the capability macro and apply the
+# per-TU ISA flag only where the probe passed.  The guarded-out TU compiles to
+# an empty object, and ctr_add.c falls back to the scalar kernel.
+if(SYNDROME_HAVE_CTR_SSE2)
+    target_compile_definitions(talos_syndrome PRIVATE SYNDROME_HAVE_CTR_SSE2)
+    set_source_files_properties(decoder/ctr_add_sse2.c PROPERTIES
+        COMPILE_FLAGS "-msse2")
+endif()
+if(SYNDROME_HAVE_CTR_AVX2)
+    target_compile_definitions(talos_syndrome PRIVATE SYNDROME_HAVE_CTR_AVX2)
+    set_source_files_properties(decoder/ctr_add_avx2.c PROPERTIES
+        COMPILE_FLAGS "-mavx2")
+endif()
+if(SYNDROME_HAVE_CTR_NEON)
+    # Advanced SIMD is baseline on aarch64, so no per-TU arch flag.
+    target_compile_definitions(talos_syndrome PRIVATE SYNDROME_HAVE_CTR_NEON)
+endif()
 # ichor is PUBLIC for its include dir: the internal headers the test suite
 # consumes (core/core.h) reference <ichor/version.h> for the version guard.
 # ichor types still never appear in the public talos_syndrome.h surface, and

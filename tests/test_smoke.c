@@ -30,6 +30,22 @@ set_name(syndrome_set_id set)
         return "SYN_256_2";
     case SYNDROME_SET_256_5:
         return "SYN_256_5";
+    case SYNDROME_SET_128_3:
+        return "SYN_128_3";
+    case SYNDROME_SET_128_4:
+        return "SYN_128_4";
+    case SYNDROME_SET_192_2:
+        return "SYN_192_2";
+    case SYNDROME_SET_192_3:
+        return "SYN_192_3";
+    case SYNDROME_SET_192_4:
+        return "SYN_192_4";
+    case SYNDROME_SET_192_5:
+        return "SYN_192_5";
+    case SYNDROME_SET_256_3:
+        return "SYN_256_3";
+    case SYNDROME_SET_256_4:
+        return "SYN_256_4";
     default:
         return "?";
     }

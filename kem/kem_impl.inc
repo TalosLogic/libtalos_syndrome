@@ -216,9 +216,10 @@ done:
 }
 
 int
-syndrome_kem_decap_impl(uint8_t k[SYNDROME_SS_BYTES],
-                        const uint8_t ct[SYNDROME_CT_BYTES],
-                        const uint8_t sk[SYNDROME_SK_BYTES])
+syndrome_kem_decap_impl_ex(uint8_t k[SYNDROME_SS_BYTES],
+                           const uint8_t ct[SYNDROME_CT_BYTES],
+                           const uint8_t sk[SYNDROME_SK_BYTES],
+                           ichor_pool_t *pool)
 {
     syndrome_qcmdpc_sk qsk;
     uint64_t r[SYNDROME_N0][SYNDROME_GF2X_LIMBS];
@@ -251,7 +252,7 @@ syndrome_kem_decap_impl(uint8_t k[SYNDROME_SS_BYTES],
     }
 
     /* Decode: ok == "residual private syndrome zero" == (M*e'^T == s). */
-    syndrome_pke_decrypt(r, &ok, &qsk, ct);
+    syndrome_pke_decrypt(r, &ok, &qsk, ct, pool);
     for (b = 0; b < (uint32_t)SYNDROME_N0; b++)
         syndrome_gf2x_store(eb[b], r[b]);
 
@@ -294,6 +295,15 @@ syndrome_kem_decap_impl(uint8_t k[SYNDROME_SS_BYTES],
     ichor_secure_zero(k_real, sizeof(k_real));
     ichor_secure_zero(k_reject, sizeof(k_reject));
     return 0; /* never an error oracle: failure is implicit rejection */
+}
+
+/* Serial decap: syndrome_kem_decap_impl_ex with no thread pool. */
+int
+syndrome_kem_decap_impl(uint8_t k[SYNDROME_SS_BYTES],
+                        const uint8_t ct[SYNDROME_CT_BYTES],
+                        const uint8_t sk[SYNDROME_SK_BYTES])
+{
+    return syndrome_kem_decap_impl_ex(k, ct, sk, NULL);
 }
 
 /*

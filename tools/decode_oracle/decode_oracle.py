@@ -58,8 +58,20 @@ PARAMS = {
     (256, 2): {"p": 43451, "v": 135, "t": 261, "thresholds": (77, 69, 69)},
     (128, 5): {"p": 7829,  "v": 83,  "t": 57,  "thresholds": (49, 42, 42)},
     (256, 5): {"p": 24733, "v": 165, "t": 113, "thresholds": (93, 85, 84)},
+    (128, 3): {"p": 10037, "v": 77,  "t": 83,  "thresholds": (45, 41, 40)},
+    (128, 4): {"p": 8627,  "v": 81,  "t": 66,  "thresholds": (48, 41, 41)},
+    (192, 2): {"p": 26813, "v": 103, "t": 195, "thresholds": (60, 53, 52)},
+    (192, 3): {"p": 19709, "v": 115, "t": 124, "thresholds": (66, 60, 59)},
+    (192, 4): {"p": 16829, "v": 121, "t": 98,  "thresholds": (70, 62, 61)},
+    (192, 5): {"p": 15373, "v": 125, "t": 85,  "thresholds": (71, 66, 64)},
+    (256, 3): {"p": 32069, "v": 153, "t": 165, "thresholds": (87, 78, 78)},
+    (256, 4): {"p": 27437, "v": 161, "t": 131, "thresholds": (91, 82, 82)},
 }
-SETS = ((128, 2), (128, 5), (256, 2), (256, 5))
+# The original four sets lead and keep their order so their emitted vectors
+# re-emit byte-for-byte; the eight fill sets are appended.
+SETS = ((128, 2), (128, 5), (256, 2), (256, 5),
+        (128, 3), (128, 4), (192, 2), (192, 3),
+        (192, 4), (192, 5), (256, 3), (256, 4))
 ITERMAX = 3
 
 
@@ -322,8 +334,8 @@ def _emit_set(out, lam, n0, seed, first):
 
 
 def emit_c(path, seed):
-    """Write a self-contained C header of decode vectors for all four parameter
-    sets, keyed on (SYNDROME_LAMBDA, SYNDROME_N0).
+    """Write a self-contained C header of decode vectors for all twelve
+    parameter sets, keyed on (SYNDROME_LAMBDA, SYNDROME_N0).
 
     Each set carries its own key support (DKAT_H[b]) and per-case error support
     (uint16 positions, < p) plus the oracle's expected `ok`; the C test loads
@@ -365,15 +377,15 @@ def emit_c(path, seed):
     out.append("#endif /* SYNDROME_DECODE_KAT_VECTORS_H */")
     with open(path, "w") as f:
         f.write("\n".join(out) + "\n")
-    print("wrote C header %s (all four parameter sets, seed=%d)" % (path, seed))
+    print("wrote C header %s (all twelve parameter sets, seed=%d)" % (path, seed))
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--param", type=int, choices=(128, 256), default=128,
+    ap.add_argument("--param", type=int, choices=(128, 192, 256), default=128,
                     help="security level lambda (default 128)")
-    ap.add_argument("--n0", type=int, choices=(2, 5), default=2,
+    ap.add_argument("--n0", type=int, choices=(2, 3, 4, 5), default=2,
                     help="number of circulant blocks (default 2)")
     ap.add_argument("--seed", type=int, default=0,
                     help="PRNG seed for reproducible vectors (default 0)")

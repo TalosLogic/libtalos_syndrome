@@ -64,7 +64,7 @@ code. Pick the set you want to check:
 
 ```sh
 cmake -B build -DSYNDROME_BUILD_DUDECT=ON
-cmake --build build --target syndrome_dudect_128_5   # or 128_2 / 256_2 / 256_5
+cmake --build build --target syndrome_dudect_128_5   # or any {128,192,256}_{2,3,4,5}
 # disable frequency scaling first for stable numbers:
 sudo cpupower frequency-set -g performance
 ./build/tools/dudect/syndrome_dudect_128_5 --all

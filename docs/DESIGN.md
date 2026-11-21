@@ -63,11 +63,12 @@ The table below lists **every** parameter set from Table 2 of 2025/1043, all
 at-a-glance reference for parameter selection and circuit sizing. `p`, `v`, `t`,
 and the decoder thresholds are transcribed verbatim; the −log₂(DFR) column is the
 independent recomputation of §3.2, which may differ from the paper's printed
-figure by up to 0.1 (rounding). **The library builds and audits the four
-Long-Term sets `{λ128, λ256} × {n0 = 2, n0 = 5}`**, selected at build time
-(`SYNDROME_MINIMAL_BUILD`). The thresholds are a security input tied to the DFR
-analysis: changing a parameter without re-deriving thresholds and re-validating
-the DFR bound is a security bug.
+figure by up to 0.1 (rounding). **The library builds all twelve Long-Term sets
+`{λ128, λ192, λ256} × {n0 ∈ {2, 3, 4, 5}}`**, each with its own per-set dudect
+target, selected at build time (`SYNDROME_MINIMAL_BUILD`; all enabled by
+default). The thresholds are a security input tied to the DFR analysis: changing
+a parameter without re-deriving thresholds and re-validating the DFR bound is a
+security bug.
 
 | λ    | n | `p`   | `v` | `t` | thresholds (it. 1/2/3) | −log₂(DFR) |
 |------|---|-------|-----|-----|------------------------|------------|
@@ -94,10 +95,13 @@ long-term. They also buy little in practice: in a VOLE-in-the-Head circuit their
 smaller parameters do not lower the dominant cost enough to matter, and even in a
 plain forward-secrecy protocol the gain is marginal, since an ephemeral key must
 ship a fresh public key for **every** shared-secret rotation, whereas one
-Long-Term key is reused across many rotations. The `n0 ∈ {3, 4}` and λ = 192 sets
-are reference-only: the shipped build is `n0 ∈ {2, 5}` at λ128 and λ256 (λ192
-approaches 256's cost for less security; `n0` 3/4 are additive later sets), over
-the n0-generic path of §3.1.
+Long-Term key is reused across many rotations. The `n0 ∈ {3, 4}` fill sets and the
+λ = 192 level now ship alongside the original `n0 ∈ {2, 5}` sets at λ128 / λ256
+(λ192 approaches λ256's cost for less security; `n0` 3/4 trade public-key size
+against in-circuit cost between the n0=2 and n0=5 extremes), all over the
+n0-generic path of §3.1. The Argus opener KDF at λ192 is Grøstl-256 truncated to
+the leading 24 bytes (the 192-bit DEM key), domain-separated from λ256 by the IV
+byte `0x18`; see §6.
 
 The persisted root-seed size scales with the level:
 `SYNDROME_KEYSEED_BYTES` = 2λ bits = 32 (λ128) / 64 (λ256). This is the size of
@@ -114,7 +118,7 @@ compiled per variant and multiplexed by a dispatcher above the API, and runtime
 `p` never leaks *inside* a primitive. Concretely, each set is its own translation
 unit (`sets/syn_<lambda>_<n0>.c`) that `#define`s `SYNDROME_LAMBDA` /
 `SYNDROME_N0`, includes the generic `*_impl.inc` bodies to materialize that set's
-constants, and exports one `const syndrome_set_vtable`; `syndrome.c` selects the
+constants, and exports one `const syndrome_set_vtable`; `core/syndrome.c` selects the
 vtable by `set_id`. The `set_id` is public, never secret, so dispatching on it is
 not a side channel. Why the per-set constants stay compile-time rather than a
 runtime `p`:
@@ -463,6 +467,53 @@ and canonical-ciphertext rejection) are pinned in §4.8, and `M·e'^T == s` is
 realized by the decoder's residual-syndrome `ok` flag rather than a separate
 re-encryption.
 
+### 4.10 Optional parallel decode {#parallel-decode}
+
+The decoder is the dominant cost of both `decap` and Argus `open`, and it can
+optionally run multi-threaded. The threaded entry points (`syndrome_kem_decap_ex`
+/ `syndrome_argus_open_ex`, taking a `syndrome_opts_t`) are additive twins; the
+non-`_ex` functions are the serial reference. Caller-facing setup (the two pool
+ownership modes) is in the README; the internal design is here.
+
+- **What is parallelised.** Within one decode, the per-iteration counter
+  accumulation (the hot path) is partitioned over the support column-weight (`v`)
+  loop, not over the `n0` blocks (too few to fill a pool). Each worker accumulates
+  a private bit-sliced counter over its slice of the support; the partials are
+  combined with a constant-time full-adder (a ripple-carry bit-sliced add, not an
+  XOR). All `n0` blocks of a single decoder iteration are independent (they read
+  the same not-yet-updated syndrome) and so batch into one pool dispatch, giving
+  `SYNDROME_ITERMAX` dispatches per decode rather than `SYNDROME_ITERMAX · n0`.
+
+- **Determinism (byte-identical for any thread count).** Integer addition is
+  associative and commutative, so the merged counters, the resulting flips, and
+  hence the recovered error and the derived shared secret are identical to the
+  serial accumulation for every thread count and for the serial path. A
+  determinism test (`tests/test_decode_threads`) pins this invariance, so
+  threading never changes a decode result or a shared secret and leaves all KATs
+  and goldens frozen.
+
+- **Constant-time is preserved.** The partition bounds (`v`, `n0`, the per-worker
+  chunk ranges) are public; every worker runs the same secret-driven constant-time
+  barrel rotation per support offset; the running slot counters and the pool
+  scheduling never depend on secret data; and each worker's scratch is private.
+  So threading adds no secret-dependent branch, memory-access pattern, or timing
+  path over the serial decoder: the only secret, the support, still enters solely
+  as the rotation amount of §3's constant-time rotate.
+
+- **Pool model (borrow-or-create).** A caller-supplied pool is borrowed and never
+  destroyed (so a repeat caller reuses one pool); otherwise an internal pool sized
+  by `thread_count` is created and destroyed within the call, and `thread_count ≤
+  1` (or a `NULL` opts) runs the original serial loop. Nothing the library
+  allocates outlives the call, there is no global mutable state, and the
+  circulant-ring wrappers are reentrant (per-call stack scratch, §3.1), so
+  concurrent workers never share mutable ring state. A pool-creation failure
+  degrades to the serial path, never an error.
+
+- **Non-claim.** Threading is a pure performance option. The speedup is
+  Amdahl-bound by the unthreaded remainder and is platform- and
+  workload-dependent, so the library makes no performance claim either way (§10);
+  the serial path is the behavioral reference.
+
 ## 5. Deterministic key generation from a 2λ-bit root seed {#seed-keygen}
 
 Key generation is factored so that a **seed-input function is the core
@@ -704,9 +755,10 @@ designated-opener path; it is a *different* construction from the general
   `ct = identity ⊕ pad[0:identity_len]`, opened as
   `identity = ct ⊕ pad[0:identity_len]`. When
   `identity_len ≤ SYNDROME_ARGUS_KEY_BYTES` (the extractor width: 16 B at λ=128,
-  32 B at λ=256) the pad *is* the extractor output `root = H(support(e))`. When
-  `identity_len` exceeds it, `root` keys AES-CTR (AES-128 at λ=128, AES-256 at
-  λ=256) and the pad is the keystream `AES_root(L ‖ 0) ‖ AES_root(L ‖ 1) ‖ …`
+  24 B at λ=192, 32 B at λ=256) the pad *is* the extractor output
+  `root = H(support(e))`. When `identity_len` exceeds it, `root` keys AES-CTR
+  (AES-128 at λ=128, AES-192 at λ=192, AES-256 at λ=256) and the pad is the
+  keystream `AES_root(L ‖ 0) ‖ AES_root(L ‖ 1) ‖ …`
   truncated to `identity_len`, with `L` a fixed 12-byte context label
   (`ARGUS_CTR_LABEL`) and a 4-byte big-endian block counter.
   `identity_len ≤ SYNDROME_ARGUS_ID_MAX_BYTES` (below); it is a public protocol
@@ -719,9 +771,9 @@ designated-opener path; it is a *different* construction from the general
   and which `root` (and hence the keystream) inherits.
 - **KDF input encoding.** `support(e)` is the `t` set positions of `e` over
   `[0, n)`: block 0 in `[0, p)`, block 1 in `p + [0, p)`, **sorted ascending**.
-  Each global position is **bit-packed, LSB-first, into exactly
-  `⌈log₂(n)⌉ = ⌈log₂(2p)⌉` bits** (15 at λ=128, 17 at λ=256), not a byte-aligned
-  `uint32`. The packed message is `pack(idx₀) ‖ … ‖ pack(idx_{t-1})`,
+  Each global position is **bit-packed, LSB-first, into exactly `⌈log₂(n)⌉` bits**
+  (`n = n₀·p`; e.g. 15-16 at λ=128, 16-17 at λ=192, 17 at λ=256), not a
+  byte-aligned `uint32`. The packed message is `pack(idx₀) ‖ … ‖ pack(idx_{t-1})`,
   `t·⌈log₂(2p)⌉` bits wide. Bit-packing minimises the number of compression
   blocks the in-circuit signer must evaluate (the dominant KDF cost) and is
   itself free in-circuit (linear wire re-routing, no S-boxes); it roughly halves
@@ -736,6 +788,10 @@ designated-opener path; it is a *different* construction from the general
   bullet):
   - λ=128 (**AES-DM**, `ichor_aesdm_iteration`, 16-B block): `H₀ = ARGUS_DM_IV`;
     `H ← DM(H, Mᵢ)` per block; `root = H_final` (16 B).
+  - λ=192 (**Grøstl-256**, `ichor_grostl256`, 64-B block): same as λ=256, but the
+    32-B digest is truncated to its leading `SYNDROME_ARGUS_KEY_BYTES` = 24 B
+    (the 192-bit `root`). There is no 24-B AES-round hash, so Grøstl-256 is reused
+    and domain-separated from λ=256 by the IV `λ`-byte (next bullet).
   - λ=256 (**Grøstl-256**, `ichor_grostl256`, 64-B block): initial chaining value
     `ARGUS_G256_IV` in place of Grøstl's standard length-encoding IV; `root` is
     the 32-B digest.
@@ -745,7 +801,8 @@ designated-opener path; it is a *different* construction from the general
   readable, Argus-specific constant, matching Grøstl's own structured-IV
   convention and costing zero extra blocks, since a distinct fixed public IV
   yields an independent function. Its 16-byte core is `"TALOS"(5) ‖ "Argus"(5) ‖
-  λ-in-bytes(1: 0x10 / 0x20) ‖ primitive-id(1: 0x01=AES-DM, 0x02=Grøstl-256;
+  λ-in-bytes(1: 0x10 / 0x18 / 0x20) ‖ primitive-id(1: 0x01=AES-DM, 0x02=Grøstl-256
+  for both λ=192 and λ=256, distinguished by the λ-byte;
   0x03=Hirose, 0x04=Grøstl-512 reserved, not compiled in 1.11.0) ‖
   n0(1, the literal block count) ‖ version(3, big-endian u24)`, which fills the
   AES-DM IV exactly and is
@@ -757,8 +814,9 @@ designated-opener path; it is a *different* construction from the general
 - **Signaled `prim_id`, single compiled prim.** The `primitive-id`
   byte is also carried at the front of the Argus tag (`tag = prim_id ‖ s ‖ ct`),
   so the tag is self-describing and future hashes are
-  additive with no wire change. 1.0.0 compiles and opens only the per-λ default
-  (0x01 at λ128, 0x02 at λ256); `syndrome_argus_open` parses `prim_id` and, if it
+  additive with no wire change. Each build compiles and opens only the per-λ
+  default (0x01 at λ128, 0x02 at λ192 and λ256); `syndrome_argus_open` parses
+  `prim_id` and, if it
   is not the compiled default, returns a fail-closed `SYNDROME_ARGUS_EUNSUPPORTED`
   early (before decode; `prim_id` is public, so this branch is not a reaction
   oracle on H). Reserved ids 0x03/0x04 (Hirose / Grøstl-512) become a runtime

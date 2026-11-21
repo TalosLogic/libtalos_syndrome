@@ -22,6 +22,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <ichor/pool.h> /* ichor_pool_t (threaded open; NULL = serial) */
+
 #include "set_internal.h" /* syndrome_drbg (via core.h) and the SYNDROME_* sizes */
 
 /*
@@ -52,6 +54,17 @@ static int syndrome_argus_seal_derand(uint8_t *tag,
 static int syndrome_argus_open_impl(uint8_t *identity_out, size_t identity_len,
                                     const uint8_t *tag, size_t tag_len,
                                     const uint8_t sk[SYNDROME_SK_BYTES]);
+
+/*
+ * Threaded open: syndrome_argus_open_impl with an optional ichor pool (NULL =
+ * serial).  A non-NULL pool parallelises the internal decode; the recovered
+ * identity and status are byte-identical for any pool.
+ */
+static int syndrome_argus_open_impl_ex(uint8_t *identity_out,
+                                       size_t identity_len, const uint8_t *tag,
+                                       size_t tag_len,
+                                       const uint8_t sk[SYNDROME_SK_BYTES],
+                                       ichor_pool_t *pool);
 
 /*
  * argus_tail: the post-decode Argus work split out of syndrome_argus_open_impl

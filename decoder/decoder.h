@@ -12,6 +12,8 @@
 #ifndef SYNDROME_DECODER_H
 #define SYNDROME_DECODER_H
 
+#include <ichor/pool.h> /* ichor_pool_t (threaded decode; NULL = serial) */
+
 #include "set_internal.h" /* sizes (via set_params.h) + gf2x (static) */
 
 /*
@@ -49,6 +51,18 @@ static void syndrome_bitflip_decode(uint64_t (*)[SYNDROME_GF2X_LIMBS], int *,
                                     const uint64_t (*)[SYNDROME_GF2X_LIMBS],
                                     const uint16_t (*)[SYNDROME_V],
                                     const uint64_t *);
+
+/*
+ * As syndrome_bitflip_decode, but with an optional ichor thread pool: a non-NULL
+ * pool parallelises the internal counter accumulation.  The recovered error and
+ * *ok are byte-identical for any pool (and for pool == NULL, the serial path
+ * that syndrome_bitflip_decode calls).  Threading never changes the result, so
+ * the constant-time contract above is unaffected.
+ */
+static void syndrome_bitflip_decode_ex(uint64_t (*)[SYNDROME_GF2X_LIMBS], int *,
+                                       const uint64_t (*)[SYNDROME_GF2X_LIMBS],
+                                       const uint16_t (*)[SYNDROME_V],
+                                       const uint64_t *, ichor_pool_t *);
 
 static int syndrome_bitflip_selftest(void);
 static int syndrome_bitflip_ctr_selftest(void);

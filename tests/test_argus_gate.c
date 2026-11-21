@@ -37,7 +37,9 @@ main(void)
 {
     static const syndrome_set_id sets[] = {
         SYNDROME_SET_128_2, SYNDROME_SET_128_5, SYNDROME_SET_256_2,
-        SYNDROME_SET_256_5};
+        SYNDROME_SET_256_5, SYNDROME_SET_128_3, SYNDROME_SET_128_4,
+        SYNDROME_SET_192_2, SYNDROME_SET_192_3, SYNDROME_SET_192_4,
+        SYNDROME_SET_192_5, SYNDROME_SET_256_3, SYNDROME_SET_256_4};
     const size_t nsets = sizeof sets / sizeof sets[0];
     size_t si;
 

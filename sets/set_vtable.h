@@ -7,7 +7,7 @@
  * Each enabled (lambda, n0) set is compiled into one wrapper TU
  * (sets/syn_<lambda>_<n0>.c) that exports exactly one external symbol: a
  * const syndrome_set_vtable carrying that set's sizes and op function pointers.
- * The public dispatch layer (syndrome.c) selects a vtable by a public
+ * The public dispatch layer (core/syndrome.c) selects a vtable by a public
  * syndrome_set_id and calls through it.  Parameter-free, so it is shared by the
  * dispatch TU and every wrapper.
  *
@@ -28,12 +28,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <ichor/pool.h> /* ichor_pool_t (threaded decap/open; NULL = serial) */
+
 #include "core.h" /* syndrome_drbg (op-pointer signatures reference it) */
 
 typedef struct {
     /* Set identity. */
-    uint16_t lambda; /* 128 / 256 */
-    uint16_t n0;     /* 2 / 5     */
+    uint16_t lambda; /* 128 / 192 / 256 */
+    uint16_t n0;     /* 2 / 3 / 4 / 5    */
 
     /* Per-set byte sizes (the removed flat SYNDROME_*_BYTES macros). */
     size_t pk_bytes;
@@ -60,6 +62,17 @@ typedef struct {
                              syndrome_drbg *rng);
     int (*argus_open)(uint8_t *identity_out, size_t identity_len,
                       const uint8_t *tag, size_t tag_len, const uint8_t *sk);
+    /*
+     * Threaded twins of decap / argus_open: identical results, but a non-NULL
+     * pool parallelises the decode (the public _ex entry points pass the pool
+     * built from syndrome_opts_t.thread_count).  kem_decap / argus_open are
+     * these with pool == NULL.
+     */
+    int (*kem_decap_ex)(uint8_t *k, const uint8_t *ct, const uint8_t *sk,
+                        ichor_pool_t *pool);
+    int (*argus_open_ex)(uint8_t *identity_out, size_t identity_len,
+                         const uint8_t *tag, size_t tag_len, const uint8_t *sk,
+                         ichor_pool_t *pool);
 } syndrome_set_vtable;
 
 #ifdef SYNDROME_BUILT_SYN_128_2
@@ -73,6 +86,30 @@ extern const syndrome_set_vtable syndrome_set_256_2;
 #endif
 #ifdef SYNDROME_BUILT_SYN_256_5
 extern const syndrome_set_vtable syndrome_set_256_5;
+#endif
+#ifdef SYNDROME_BUILT_SYN_128_3
+extern const syndrome_set_vtable syndrome_set_128_3;
+#endif
+#ifdef SYNDROME_BUILT_SYN_128_4
+extern const syndrome_set_vtable syndrome_set_128_4;
+#endif
+#ifdef SYNDROME_BUILT_SYN_192_2
+extern const syndrome_set_vtable syndrome_set_192_2;
+#endif
+#ifdef SYNDROME_BUILT_SYN_192_3
+extern const syndrome_set_vtable syndrome_set_192_3;
+#endif
+#ifdef SYNDROME_BUILT_SYN_192_4
+extern const syndrome_set_vtable syndrome_set_192_4;
+#endif
+#ifdef SYNDROME_BUILT_SYN_192_5
+extern const syndrome_set_vtable syndrome_set_192_5;
+#endif
+#ifdef SYNDROME_BUILT_SYN_256_3
+extern const syndrome_set_vtable syndrome_set_256_3;
+#endif
+#ifdef SYNDROME_BUILT_SYN_256_4
+extern const syndrome_set_vtable syndrome_set_256_4;
 #endif
 
 #endif /* SYNDROME_SET_VTABLE_H */

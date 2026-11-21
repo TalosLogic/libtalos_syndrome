@@ -28,7 +28,7 @@ The binary lands at `build-prof/tools/profile_driver/syndrome_profile`.
 ```
 usage: syndrome_profile [iterations] [set] [op]
   iterations: 1..1000000 (default 50)
-  set:        128_2 | 128_5 | 256_2 | 256_5 (default all enabled; "-" also = all)
+  set:        {128,192,256}_{2,3,4,5} (default all enabled; "-" also = all)
   op:         keygen | encap | decap | argus (default all)
 ```
 

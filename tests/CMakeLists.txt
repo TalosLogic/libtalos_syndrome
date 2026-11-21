@@ -141,6 +141,19 @@ target_link_libraries(test_bitvec PRIVATE talos_syndrome syndrome_warnings)
 target_include_directories(test_bitvec PRIVATE ${CMAKE_SOURCE_DIR}/core)
 add_test(NAME bitvec COMMAND test_bitvec)
 
+# Bit-sliced counter merge (ctr_merge): partial counters sum to the serial
+# accumulation, any partition / fold order.  Shared, parameter-free.
+add_executable(test_ctr_merge test_ctr_merge.c)
+target_link_libraries(test_ctr_merge PRIVATE talos_syndrome syndrome_warnings)
+target_include_directories(test_ctr_merge PRIVATE ${CMAKE_SOURCE_DIR}/decoder)
+add_test(NAME ctr_merge COMMAND test_ctr_merge)
+
+# Threaded-decode determinism: decap byte-identical across thread_count (S4).
+# Public API only; links ichor for the thread pool the _ex path spins up.
+add_executable(test_decode_threads test_decode_threads.c)
+target_link_libraries(test_decode_threads PRIVATE talos_syndrome syndrome_warnings ichor)
+add_test(NAME decode_threads COMMAND test_decode_threads)
+
 # ---------------------------------------------------------------------------
 # Per-set component / KAT tests (one binary per built set).
 # ---------------------------------------------------------------------------
@@ -159,6 +172,9 @@ foreach(_setnum ${SYNDROME_BUILT_SETNUMS})
 
     # Fixed-seed KAT / regression gates (heavier; some labelled slow).
     syndrome_add_set_test(sample_kat  ${_setnum})
+    # decode_kat consumes pinned input vectors (decode_kat_vectors.h) with
+    # from-spec oracle outcomes (tools/decode_oracle), generated for all twelve
+    # parameter sets.
     syndrome_add_set_test(decode_kat  ${_setnum} SLOW)
     syndrome_add_set_test(kem_kat     ${_setnum} SLOW)
     syndrome_add_set_test(argus_kat   ${_setnum} SLOW)
@@ -298,3 +314,70 @@ if("256_2" IN_LIST SYNDROME_BUILT_SETNUMS)
     syndrome_add_dfr_test(256 5 19603)
     syndrome_add_dfr_test(256 5 19717)
 endif()
+
+# ---------------------------------------------------------------------------
+# Real-p PKE round-trip failure dissector (test_dfr_probe) -- diagnostic for the
+# intermittent honest-round-trip failure (decap K != encap K in test_kem).
+# Unlike dfr_mc (reduced waterfall p, model gate), this runs the FULL PKE round-
+# trip at the set's REAL p and, on each failure, classifies the layer: ct<->sp
+# map bug / intrinsic floor (both decoders fail) / production decoder bug (dense
+# oracle recovers e) / undetected miscorrection.  Built per set but NOT wired as
+# a default ctest: it is a long-running manual probe (the real-p DFR is tiny, so
+# it needs many trials).  Run e.g. ./test_dfr_probe_256_2 2000000.
+# ---------------------------------------------------------------------------
+function(syndrome_add_dfr_probe lambda n0)
+    set(_tgt test_dfr_probe_${lambda}_${n0})
+    add_executable(${_tgt} test_dfr_probe.c)
+    target_compile_options(${_tgt} PRIVATE
+        -include ${CMAKE_SOURCE_DIR}/sets/set_bodies.inc -UNDEBUG)
+    set_source_files_properties(test_dfr_probe.c PROPERTIES
+        COMPILE_OPTIONS -Wno-unused-function)
+    target_compile_definitions(${_tgt} PRIVATE
+        _POSIX_C_SOURCE=200809L
+        SYNDROME_LAMBDA=${lambda} SYNDROME_N0=${n0})
+    if(APPLE)
+        target_compile_definitions(${_tgt} PRIVATE _DARWIN_C_SOURCE)
+    endif()
+    target_include_directories(${_tgt} PRIVATE ${_syn_test_includes})
+    target_link_libraries(${_tgt} PRIVATE
+        talos_syndrome syndrome_warnings ichor m Threads::Threads)
+endfunction()
+
+foreach(_setnum ${SYNDROME_BUILT_SETNUMS})
+    string(REPLACE "_" ";" _probe_parts ${_setnum})
+    list(GET _probe_parts 0 _probe_lam)
+    list(GET _probe_parts 1 _probe_n0)
+    syndrome_add_dfr_probe(${_probe_lam} ${_probe_n0})
+endforeach()
+
+# ---------------------------------------------------------------------------
+# KEM-level round-trip dissector (test_dfr_kem_probe) -- same build shape as the
+# PKE probe above, but runs the FULL KEM round-trip (keygen/encap/decap, compares
+# K) and, on a mismatch, classifies decoder vs the FO / accept_kdf / valid-mask
+# layer that the PKE probe cannot see.  Manual diagnostic, not a default ctest.
+# Run e.g. ./test_dfr_kem_probe_256_2 2000000.
+# ---------------------------------------------------------------------------
+function(syndrome_add_kem_probe lambda n0)
+    set(_tgt test_dfr_kem_probe_${lambda}_${n0})
+    add_executable(${_tgt} test_dfr_kem_probe.c)
+    target_compile_options(${_tgt} PRIVATE
+        -include ${CMAKE_SOURCE_DIR}/sets/set_bodies.inc -UNDEBUG)
+    set_source_files_properties(test_dfr_kem_probe.c PROPERTIES
+        COMPILE_OPTIONS -Wno-unused-function)
+    target_compile_definitions(${_tgt} PRIVATE
+        _POSIX_C_SOURCE=200809L
+        SYNDROME_LAMBDA=${lambda} SYNDROME_N0=${n0})
+    if(APPLE)
+        target_compile_definitions(${_tgt} PRIVATE _DARWIN_C_SOURCE)
+    endif()
+    target_include_directories(${_tgt} PRIVATE ${_syn_test_includes})
+    target_link_libraries(${_tgt} PRIVATE
+        talos_syndrome syndrome_warnings ichor m Threads::Threads)
+endfunction()
+
+foreach(_setnum ${SYNDROME_BUILT_SETNUMS})
+    string(REPLACE "_" ";" _kprobe_parts ${_setnum})
+    list(GET _kprobe_parts 0 _kprobe_lam)
+    list(GET _kprobe_parts 1 _kprobe_n0)
+    syndrome_add_kem_probe(${_kprobe_lam} ${_kprobe_n0})
+endforeach()

@@ -4,6 +4,50 @@ All notable changes to libtalos_syndrome are recorded here. See
 [`docs/DESIGN.md`](docs/DESIGN.md) for the authoritative design rationale behind
 each item.
 
+## 1.1.0
+
+### Added
+
+- **Eight more parameter sets** completing all twelve rows of ePrint 2025/1043
+  Table 2 (the `λ192` level plus the `n₀ ∈ {3, 4}` fills). Enabled by default;
+  `syndrome_set_id` values appended, existing ids unchanged.
+  [`docs/DESIGN.md` §3](docs/DESIGN.md#parameter-sets).
+- **Argus opener KDF at λ192** (Grøstl-256 truncated to 24 bytes).
+  [`docs/DESIGN.md` §6.2](docs/DESIGN.md#argus-recipe).
+- **Optional multi-threaded decode**: `syndrome_kem_decap_ex` /
+  `syndrome_argus_open_ex` + `syndrome_opts_t`, byte-identical at any thread
+  count. See the README "Threading" section.
+
+### Performance
+
+- SIMD decoder counter kernels (SSE2 / AVX2 / NEON, scalar floor), all
+  bit-identical.
+- Threaded decode over the support loop (n₀ blocks batched per dispatch).
+- Faster Argus support extraction and circulant ring arithmetic (the latter from
+  the ichor 1.4.0 bump).
+
+Serial single-core speedup over 1.0.0 on a Core i9 (median of 5000 iterations
+per op), for the four sets that shipped in 1.0.0:
+
+| set   | keypair | encap | decap | argus_open |
+|-------|---------|-------|-------|------------|
+| 128_2 | 2.0×    | 1.7×  | 4.0×  | 3.4×       |
+| 128_5 | 1.7×    | 1.7×  | 4.0×  | 3.7×       |
+| 256_2 | 2.0×    | 1.9×  | 4.1×  | 3.7×       |
+| 256_5 | 1.9×    | 2.0×  | 4.6×  | 4.1×       |
+
+### Fixed
+
+- Intermittent decapsulation mismatch at real parameters, from an
+  `ichor_gf2x_scatter` span-check bug that inflated the failure rate above the
+  design DFR; fixed via the ichor 1.4.0 bump.
+
+### Changed
+
+- Vendored `libtalos_ichor` bumped to 1.4.0 (gf2x SIMD backends + constant-time
+  hardening). Wire-compatible; the additive `_ex` entry points are the only API
+  change, hence the minor bump.
+
 ## 1.0.0
 
 Initial release: a clean-room QC-MDPC Niederreiter post-quantum KEM with a

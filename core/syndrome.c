@@ -12,10 +12,12 @@
  * argus_open are deterministic and dispatch directly.  The DRBG and system RNG
  * are parameter-free (core/rng.c, shared).
  */
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
 #include <ichor/hash.h>
+#include <ichor/pool.h>
 #include <ichor/util.h>
 
 #include "core.h"
@@ -53,6 +55,30 @@ static const syndrome_set_vtable *const set_table[SYNDROME_SET_COUNT] = {
 #endif
 #ifdef SYNDROME_BUILT_SYN_256_5
     [SYNDROME_SET_256_5] = &syndrome_set_256_5,
+#endif
+#ifdef SYNDROME_BUILT_SYN_128_3
+    [SYNDROME_SET_128_3] = &syndrome_set_128_3,
+#endif
+#ifdef SYNDROME_BUILT_SYN_128_4
+    [SYNDROME_SET_128_4] = &syndrome_set_128_4,
+#endif
+#ifdef SYNDROME_BUILT_SYN_192_2
+    [SYNDROME_SET_192_2] = &syndrome_set_192_2,
+#endif
+#ifdef SYNDROME_BUILT_SYN_192_3
+    [SYNDROME_SET_192_3] = &syndrome_set_192_3,
+#endif
+#ifdef SYNDROME_BUILT_SYN_192_4
+    [SYNDROME_SET_192_4] = &syndrome_set_192_4,
+#endif
+#ifdef SYNDROME_BUILT_SYN_192_5
+    [SYNDROME_SET_192_5] = &syndrome_set_192_5,
+#endif
+#ifdef SYNDROME_BUILT_SYN_256_3
+    [SYNDROME_SET_256_3] = &syndrome_set_256_3,
+#endif
+#ifdef SYNDROME_BUILT_SYN_256_4
+    [SYNDROME_SET_256_4] = &syndrome_set_256_4,
 #endif
 };
 
@@ -356,23 +382,118 @@ syndrome_kem_encap(syndrome_set_id set, uint8_t *ct, uint8_t *k,
     return ret;
 }
 
+void
+syndrome_opts_init(syndrome_opts_t *opts)
+{
+    if (opts == NULL)
+        return;
+    opts->struct_size = sizeof(*opts);
+    opts->pool = NULL;      /* create an internal pool by default */
+    opts->thread_count = 0; /* serial by default */
+}
+
+/*
+ * Worker count requested by opts: 0 (serial) for a NULL opts, an opts whose
+ * struct_size is too small to carry thread_count (an older caller, or one that
+ * skipped syndrome_opts_init), or an explicit 0/1.  The struct_size gate is the
+ * forward/backward-ABI contract documented in talos_syndrome.h.
+ */
+static unsigned
+opts_thread_count(const syndrome_opts_t *opts)
+{
+    if (opts == NULL)
+        return 0;
+    if (opts->struct_size <
+        offsetof(syndrome_opts_t, thread_count) + sizeof(opts->thread_count))
+        return 0;
+    return opts->thread_count;
+}
+
+/*
+ * Build the internal decode pool for a requested worker count (>1), or NULL for
+ * the serial path.  A creation failure degrades to serial (NULL), never an
+ * error: threading is a performance option, so it must never change the result
+ * or fail a call that would otherwise succeed.
+ */
+static ichor_pool_t *
+decode_pool_create(unsigned thread_count)
+{
+    ichor_pool_t *pool = NULL;
+
+    if (thread_count > 1u && ichor_pool_create(&pool, thread_count) != 0)
+        pool = NULL;
+    return pool;
+}
+
+/*
+ * Caller-supplied pool, or NULL when opts does not carry one (a NULL opts, or
+ * an opts whose struct_size predates the pool field).  Same struct_size gate as
+ * opts_thread_count: a field is honoured only when the caller's struct covers
+ * it.
+ */
+static ichor_pool_t *
+opts_borrow_pool(const syndrome_opts_t *opts)
+{
+    if (opts == NULL)
+        return NULL;
+    if (opts->struct_size <
+        offsetof(syndrome_opts_t, pool) + sizeof(opts->pool))
+        return NULL;
+    return opts->pool;
+}
+
+/*
+ * Resolve the decode pool for a call (borrow-or-create, mirroring voleith).  A
+ * caller-supplied pool is borrowed (*owns = 0): the caller owns its lifetime,
+ * so it is never destroyed here.  Otherwise an internal pool is created for the
+ * call (*owns = 1) and the caller destroys it via the *owns guard.  A serial
+ * request yields NULL, which the *owns guard also skips.
+ */
+static ichor_pool_t *
+decode_pool_resolve(const syndrome_opts_t *opts, int *owns)
+{
+    ichor_pool_t *pool = opts_borrow_pool(opts);
+
+    if (pool != NULL) {
+        *owns = 0;
+        return pool;
+    }
+    *owns = 1;
+    return decode_pool_create(opts_thread_count(opts));
+}
+
 int
-syndrome_kem_decap(syndrome_set_id set, uint8_t *k, const uint8_t *ct,
-                   const uint8_t *sk)
+syndrome_kem_decap_ex(syndrome_set_id set, uint8_t *k, const uint8_t *ct,
+                      const uint8_t *sk, const syndrome_opts_t *opts)
 {
     const syndrome_set_vtable *v = lookup(set);
+    ichor_pool_t *pool;
+    int owns, ret;
 
     if (v == NULL)
         return -1;
     if (k == NULL || ct == NULL || sk == NULL)
         return -1;
-    return v->kem_decap(k, ct, sk);
+
+    pool = decode_pool_resolve(opts, &owns);
+    ret = v->kem_decap_ex(k, ct, sk, pool);
+    if (owns && pool != NULL)
+        ichor_pool_destroy(pool);
+    return ret;
 }
 
 int
-syndrome_argus_open(syndrome_set_id set, uint8_t *identity_out,
-                    size_t identity_len, const uint8_t *tag, size_t tag_len,
-                    const uint8_t *sk, syndrome_argus_gate gate)
+syndrome_kem_decap(syndrome_set_id set, uint8_t *k, const uint8_t *ct,
+                   const uint8_t *sk)
+{
+    return syndrome_kem_decap_ex(set, k, ct, sk, NULL);
+}
+
+int
+syndrome_argus_open_ex(syndrome_set_id set, uint8_t *identity_out,
+                       size_t identity_len, const uint8_t *tag, size_t tag_len,
+                       const uint8_t *sk, syndrome_argus_gate gate,
+                       const syndrome_opts_t *opts)
 {
     const syndrome_set_vtable *v = lookup(set);
 
@@ -386,5 +507,23 @@ syndrome_argus_open(syndrome_set_id set, uint8_t *identity_out,
         return SYNDROME_ARGUS_EARGS;
     if (v == NULL)
         return SYNDROME_ARGUS_EARGS;
-    return v->argus_open(identity_out, identity_len, tag, tag_len, sk);
+    {
+        int owns;
+        ichor_pool_t *pool = decode_pool_resolve(opts, &owns);
+        int ret = v->argus_open_ex(identity_out, identity_len, tag, tag_len, sk,
+                                   pool);
+
+        if (owns && pool != NULL)
+            ichor_pool_destroy(pool);
+        return ret;
+    }
+}
+
+int
+syndrome_argus_open(syndrome_set_id set, uint8_t *identity_out,
+                    size_t identity_len, const uint8_t *tag, size_t tag_len,
+                    const uint8_t *sk, syndrome_argus_gate gate)
+{
+    return syndrome_argus_open_ex(set, identity_out, identity_len, tag, tag_len,
+                                  sk, gate, NULL);
 }

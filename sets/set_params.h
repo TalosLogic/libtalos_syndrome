@@ -56,6 +56,58 @@
 #define SYNDROME_V 165
 #define SYNDROME_T 113
 
+#elif SYNDROME_LAMBDA == 128 && SYNDROME_N0 == 3
+/* Pinned from ePrint 2025/1043 Table 2 (n = 30111); thresholds 2.3, DFR 2.4. */
+#define SYNDROME_P 10037
+#define SYNDROME_V 77
+#define SYNDROME_T 83
+
+#elif SYNDROME_LAMBDA == 128 && SYNDROME_N0 == 4
+/* Pinned from ePrint 2025/1043 Table 2 (n = 34508); thresholds 2.3, DFR 2.4. */
+#define SYNDROME_P 8627
+#define SYNDROME_V 81
+#define SYNDROME_T 66
+
+#elif SYNDROME_LAMBDA == 192 && SYNDROME_N0 == 2
+/* Pinned from ePrint 2025/1043 Table 2 (n = 53626); thresholds 2.3, DFR 2.4. */
+#define SYNDROME_P 26813
+#define SYNDROME_V 103
+#define SYNDROME_T 195
+
+#elif SYNDROME_LAMBDA == 192 && SYNDROME_N0 == 3
+/* Pinned from ePrint 2025/1043 Table 2 (n = 59127); thresholds 2.3, DFR 2.4. */
+#define SYNDROME_P 19709
+#define SYNDROME_V 115
+#define SYNDROME_T 124
+
+#elif SYNDROME_LAMBDA == 192 && SYNDROME_N0 == 4
+/* Pinned from ePrint 2025/1043 Table 2 (n = 67316); thresholds 2.3, DFR 2.4. */
+#define SYNDROME_P 16829
+#define SYNDROME_V 121
+#define SYNDROME_T 98
+
+#elif SYNDROME_LAMBDA == 192 && SYNDROME_N0 == 5
+/* Pinned from ePrint 2025/1043 Table 2 (n = 76865); thresholds 2.3, DFR 2.4. */
+#if defined(SYNDROME_TESTONLY_WATERFALL_P)
+#define SYNDROME_P SYNDROME_TESTONLY_WATERFALL_P
+#else
+#define SYNDROME_P 15373
+#endif
+#define SYNDROME_V 125
+#define SYNDROME_T 85
+
+#elif SYNDROME_LAMBDA == 256 && SYNDROME_N0 == 3
+/* Pinned from ePrint 2025/1043 Table 2 (n = 96207); thresholds 2.3, DFR 2.4. */
+#define SYNDROME_P 32069
+#define SYNDROME_V 153
+#define SYNDROME_T 165
+
+#elif SYNDROME_LAMBDA == 256 && SYNDROME_N0 == 4
+/* Pinned from ePrint 2025/1043 Table 2 (n = 109748); thresholds 2.3, DFR 2.4. */
+#define SYNDROME_P 27437
+#define SYNDROME_V 161
+#define SYNDROME_T 131
+
 #else
 #error "no parameter row for this (SYNDROME_LAMBDA, SYNDROME_N0)"
 #endif
